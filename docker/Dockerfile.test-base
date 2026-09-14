@@ -14,8 +14,12 @@ RUN apt-get update && \
 
 RUN npm install -g azurite
 
-RUN curl -fL -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio && \
-    chmod +x /usr/local/bin/minio
+# MinIO retired the standalone binaries at dl.min.io (that URL now returns HTTP 410) and
+# locked down the Docker Hub repo, so lift the server binary out of a quay.io image. Pinned
+# to the last community release rather than :latest so image builds stay reproducible, and
+# COPY --from picks the right architecture instead of the hard-coded linux-amd64 the download
+# used to force.
+COPY --from=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z /usr/bin/minio /usr/local/bin/minio
 
 RUN python3 -m venv /opt/venv && \
     . /opt/venv/bin/activate && \
