@@ -159,12 +159,17 @@ public class LanceMergedSearchColumnarPartitionReader implements PartitionReader
     ScanOptions.Builder b = new ScanOptions.Builder().nearest(q.build());
     boolean fallbackUnit = p.getIndexSegments().isEmpty();
     boolean userRequestedPrefilter = Boolean.TRUE.equals(base.getPrefilter());
-    // Lance's Scanner::nearest rejects fragment-restricted scans unless prefilter=true (a
-    // prefilter expression supplies the per-fragment limit). The lance-core JNI silently
-    // drops the nearest() error, leaving us with a non-vector scan and no `_distance`
-    // column. Force prefilter on fallback units so nearest+fragmentIds coexist.
-    // TODO: revisit once Lance JNI propagates Scanner::nearest errors and lifts this restriction.
-    if (userRequestedPrefilter || fallbackUnit) {
+    boolean hasFilter = base.getFilter() != null && !base.getFilter().isEmpty();
+    // A fragment-restricted nearest scan only runs with prefilter=true: lance-core otherwise
+    // rejects it outright with "Not supported: This operation is not supported for fragment
+    // scan" (rust/lance/src/dataset/scanner.rs). Fallback units therefore always set it.
+    //
+    // Indexed units are not under that restriction, but they have to match it whenever a
+    // filter is present. Otherwise each indexed unit applies the filter *after* picking its
+    // own top-k, and the merged result depends on whether the table happens to carry a vector
+    // index: the same query over the same rows returns different ids for an indexed and an
+    // unindexed table, and neither matches the true filtered top-k.
+    if (userRequestedPrefilter || fallbackUnit || hasFilter) {
       b.prefilter(true);
     }
     if (base.getFilter() != null) {

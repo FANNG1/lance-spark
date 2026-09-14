@@ -204,26 +204,21 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
-  void indexedSearchWithoutPrefilterDivergesFromReference() throws Exception {
+  void indexedSearchAppliesFilterBeforeTopK() throws Exception {
     String table = createTable("idx_filter", 4);
     buildSegmentPerFragment(table, fragmentIds(table));
 
     String sql = vectorSearchSql(table, 5, ", filter => 'id % 2 = 0'");
-    List<Integer> distributed = ids(collect(sql, true));
-    List<Integer> reference = ids(collect(sql, false));
-    // Documents current behavior: without an explicit prefilter the filter is applied *after*
-    // each unit picked its own top-k, so the distributed run merges post-filtered per-unit
-    // results and returns a different row set than the single-partition run.
-    assertEquals(java.util.Arrays.asList(0, 2, 4), reference, "reference post-filters top-k");
     assertEquals(
-        java.util.Arrays.asList(0, 2, 4, 64, 66),
-        distributed,
-        "distributed post-filters per unit, then merges");
+        java.util.Arrays.asList(0, 2, 4, 6, 8),
+        ids(collect(sql, true)),
+        "a filtered distributed search must return the true filtered top-k");
   }
 
   @Test
-  void unindexedTableAppliesFilterDifferentlyFromIndexedTable() throws Exception {
-    // Same data, same query, same filter - the only difference is whether a vector index exists.
+  void indexedAndUnindexedTablesAgreeOnFilteredSearch() throws Exception {
+    // Same data, same query, same filter - the only difference is whether a vector index
+    // exists. Indexed units and fallback units must not disagree about filter semantics.
     String indexed = createTable("idx_semantics_indexed", 4);
     buildSegmentPerFragment(indexed, fragmentIds(indexed));
     String unindexed = createTable("idx_semantics_plain", 4);
@@ -231,9 +226,8 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     String filterArg = ", filter => 'id % 2 = 0'";
     List<Integer> indexedRows = ids(collect(vectorSearchSql(indexed, 5, filterArg), true));
     List<Integer> unindexedRows = ids(collect(vectorSearchSql(unindexed, 5, filterArg), true));
-    // Fallback units force prefilter=true, indexed units do not, so the two tables disagree.
-    assertEquals(java.util.Arrays.asList(0, 2, 4, 6, 8), unindexedRows, "fallback prefilters");
-    assertEquals(java.util.Arrays.asList(0, 2, 4, 64, 66), indexedRows, "indexed post-filters");
+    assertEquals(java.util.Arrays.asList(0, 2, 4, 6, 8), unindexedRows, "unindexed table");
+    assertEquals(unindexedRows, indexedRows, "an index must not change which rows match");
   }
 
   @Test
