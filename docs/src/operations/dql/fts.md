@@ -5,7 +5,7 @@ Query Lance tables using full-text search (FTS) with the `lance_match`, `lance_m
 !!! warning "Prerequisites"
     - The Lance Spark SQL extension must be enabled. See [Spark SQL Extensions](../../config.md#spark-sql-extensions).
     - The Lance catalog must be the session's default catalog (`spark.sql.defaultCatalog`). Spark resolves unqualified function names against the default catalog; if it points elsewhere, calls to `lance_match`, `lance_match_phrase`, and `lance_multi_match` fail with a "function not found" error.
-    - An FTS index must exist on the target column(s). See [CREATE INDEX — FTS Options](../ddl/create-index.md#fts-options).
+    - An FTS index must exist on the target column(s). See [CREATE INDEX — FTS Options](../ddl/create-index.md#fts-inverted-options).
     - `lance_match_phrase` requires the FTS index to be built with `with_position = true`.
 
 ## lance_match
