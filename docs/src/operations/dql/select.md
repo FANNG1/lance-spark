@@ -236,8 +236,9 @@ Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a
     `VERSION AS OF '123'` query table version 123 rather than a tag named `123`. Use a tag name that
     contains at least one non-digit character.
 
-Tag queries are read-only. `UPDATE`, `DELETE`, `INSERT`, `MERGE INTO`, `ADD COLUMNS`, and
-`UPDATE COLUMNS` operations cannot target a tagged snapshot.
+Tag queries are read-only; mutating commands are rejected. Besides DML and schema changes, this
+covers `CREATE INDEX`, `DROP INDEX`, `OPTIMIZE`, `VACUUM`, `SET UNENFORCED PRIMARY KEY`, and
+branch and tag DDL. Branch identifiers behave the same way.
 
 ### Query by Branch
 
