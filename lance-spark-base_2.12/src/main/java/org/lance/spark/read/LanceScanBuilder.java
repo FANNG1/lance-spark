@@ -188,6 +188,15 @@ public class LanceScanBuilder
           SparkLanceShardingUtils.isEmpty(shardingSpec)
               ? SparkLanceShardingUtils.firstShardingSpec(dataset)
               : shardingSpec;
+
+      // Pre-compute splits and per-fragment row counts from the same Dataset handle that we
+      // already opened above. This provides the live fragment IDs needed for safe sharding
+      // detection and pins the resolved version onto the read options shipped to workers, so the
+      // zonemap stats and splits come from the same snapshot. The version is kept as a long
+      // end-to-end so long-lived high-write-frequency datasets do not silently truncate it.
+      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
+      Set<Integer> liveFragmentIds = new HashSet<>(scanPlan.getFragmentRowCounts().keySet());
+
       for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
         columnsToLoad.add(SparkLanceShardingUtils.columnName(field, lanceSchema));
       }
@@ -213,7 +222,8 @@ public class LanceScanBuilder
           continue;
         }
         java.util.Optional<Map<Integer, Object>> keys =
-            SparkLanceShardingUtils.detectFragmentKeys(field, lanceSchema, colStats);
+            SparkLanceShardingUtils.detectFragmentKeys(
+                field, lanceSchema, colStats, liveFragmentIds);
         if (keys.isPresent()) {
           fragmentShardingKeys = keys.get();
           activeShardingExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
@@ -261,12 +271,6 @@ public class LanceScanBuilder
             summary.getTotalRows());
       }
 
-      // Pre-compute splits and per-fragment row counts from the same Dataset handle that we
-      // already opened above. This consolidates two driver-side opens into one and lets us pin
-      // the resolved version onto the read options shipped to workers, providing snapshot
-      // isolation across all tasks of this query. The version is kept as a long end-to-end so
-      // long-lived high-write-frequency datasets do not silently truncate to a wrong version.
-      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
 
       Optional<String> whereCondition =
