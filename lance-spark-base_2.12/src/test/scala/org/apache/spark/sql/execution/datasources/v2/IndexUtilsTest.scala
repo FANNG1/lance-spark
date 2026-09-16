@@ -539,4 +539,233 @@ class IndexUtilsTest {
         "idx_id"))
   }
 
+  // ── methodForIndexType ────────────────────────────────────────────────────
+
+  @Test
+  def methodForIndexType_roundTripsEverySegmentBuildableType(): Unit = {
+    val types = Seq(
+      IndexType.BTREE,
+      IndexType.ZONEMAP,
+      IndexType.BITMAP,
+      IndexType.LABEL_LIST,
+      IndexType.NGRAM,
+      IndexType.BLOOM_FILTER,
+      IndexType.RTREE,
+      IndexType.INVERTED)
+
+    types.foreach { indexType =>
+      val method = IndexUtils.methodForIndexType(indexType)
+      assertTrue(method.isDefined, s"expected a method name for $indexType")
+      assertEquals(
+        Some(indexType),
+        IndexUtils.scalarSegmentIndexType(method.get),
+        s"method '${method.get}' should resolve back to $indexType")
+    }
+  }
+
+  @Test
+  def methodForIndexType_mapsInvertedToCanonicalFtsSpelling(): Unit = {
+    assertEquals(Some("fts"), IndexUtils.methodForIndexType(IndexType.INVERTED))
+  }
+
+  @Test
+  def methodForIndexType_returnsNoneForVectorType(): Unit = {
+    assertEquals(None, IndexUtils.methodForIndexType(IndexType.VECTOR))
+  }
+
+  @Test
+  def methodForIndexType_returnsNoneForNull(): Unit = {
+    assertEquals(None, IndexUtils.methodForIndexType(null))
+  }
+
+  // ── isSystemIndex ─────────────────────────────────────────────────────────
+
+  @Test
+  def isSystemIndex_matchesLanceMaintainedIndexesCaseInsensitively(): Unit = {
+    assertTrue(IndexUtils.isSystemIndex("__lance_frag_reuse"))
+    assertTrue(IndexUtils.isSystemIndex("__LANCE_MEM_WAL"))
+  }
+
+  @Test
+  def isSystemIndex_rejectsUserIndexesAndNull(): Unit = {
+    assertFalse(IndexUtils.isSystemIndex("idx_id"))
+    assertFalse(IndexUtils.isSystemIndex(null))
+  }
+
+  // ── retainedSegments ──────────────────────────────────────────────────────
+
+  private def namedSegment(name: String, fragmentIds: Int*): Index =
+    Index
+      .builder()
+      .uuid(java.util.UUID.randomUUID())
+      .name(name)
+      .indexType(IndexType.ZONEMAP)
+      .fragments(fragmentIds.map(java.lang.Integer.valueOf).asJava)
+      .build()
+
+  @Test
+  def retainedSegments_keepsOnlySegmentsOfTheNamedIndexThatStillCoverLiveFragments(): Unit = {
+    val kept = namedSegment("idx_id", 0, 1)
+    val allRetired = namedSegment("idx_id", 7)
+    val otherIndex = namedSegment("idx_other", 0)
+
+    assertEquals(
+      Seq(kept),
+      IndexUtils.retainedSegments(Seq(kept, allRetired, otherIndex), "idx_id", Set(0, 1)))
+  }
+
+  @Test
+  def retainedSegments_failsWhenTheIndexIsGone(): Unit = {
+    val error = assertThrows(
+      classOf[IllegalStateException],
+      () => IndexUtils.retainedSegments(Seq(namedSegment("idx_other", 0)), "idx_id", Set(0)))
+
+    assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
+    assertTrue(error.getMessage.contains("no longer exists"), error.getMessage)
+    assertTrue(error.getMessage.contains("CREATE INDEX"), error.getMessage)
+  }
+
+  @Test
+  def retainedSegments_returnsEmptyWhenAllSegmentsCoverOnlyRetiredFragments(): Unit = {
+    val result = IndexUtils.retainedSegments(
+      Seq(namedSegment("idx_id", 5, 6)),
+      "idx_id",
+      Set(0, 1))
+    assertEquals(Seq.empty, result)
+  }
+
+  @Test
+  def retainedSegments_matchesIndexNameExactly(): Unit = {
+    assertThrows(
+      classOf[IllegalStateException],
+      () => IndexUtils.retainedSegments(Seq(namedSegment("IDX_ID", 0)), "idx_id", Set(0)))
+  }
+
+  // ── requireUniformSegmentDetails ──────────────────────────────────────────
+
+  @Test
+  def requiresUniformSegmentDetails_onlyForInverted(): Unit = {
+    assertTrue(IndexUtils.requiresUniformSegmentDetails(IndexType.INVERTED))
+    Seq(
+      IndexType.BTREE,
+      IndexType.ZONEMAP,
+      IndexType.BITMAP,
+      IndexType.LABEL_LIST,
+      IndexType.NGRAM,
+      IndexType.BLOOM_FILTER,
+      IndexType.RTREE,
+      IndexType.VECTOR).foreach { indexType =>
+      assertFalse(IndexUtils.requiresUniformSegmentDetails(indexType), indexType.name())
+    }
+    assertFalse(IndexUtils.requiresUniformSegmentDetails(null))
+  }
+
+  @Test
+  def requireUniformSegmentDetails_acceptsMatchingDetails(): Unit = {
+    val details = Array[Byte](1, 2, 3)
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.INVERTED,
+      "idx_id",
+      "fts",
+      Seq(segment(Some(Seq(0)), Some(details.clone()))),
+      Seq(segment(Some(Seq(1)), Some(details.clone()))))
+  }
+
+  @Test
+  def requireUniformSegmentDetails_rejectsDifferingDetails(): Unit = {
+    val error = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        IndexUtils.requireUniformSegmentDetails(
+          IndexType.INVERTED,
+          "idx_id",
+          "fts",
+          Seq(segment(Some(Seq(0)), Some(Array[Byte](1, 2, 3)))),
+          Seq(segment(Some(Seq(1)), Some(Array[Byte](1, 2, 4))))))
+
+    assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
+    assertTrue(error.getMessage.contains("fts"), error.getMessage)
+    assertTrue(error.getMessage.contains("CREATE INDEX"), error.getMessage)
+  }
+
+  @Test
+  def requireUniformSegmentDetails_rejectsDisagreementWithinEitherSide(): Unit = {
+    val a = Array[Byte](1)
+    val b = Array[Byte](2)
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        IndexUtils.requireUniformSegmentDetails(
+          IndexType.INVERTED,
+          "idx_id",
+          "fts",
+          Seq(segment(Some(Seq(0)), Some(a)), segment(Some(Seq(1)), Some(b))),
+          Seq(segment(Some(Seq(2)), Some(a)))))
+  }
+
+  @Test
+  def requireUniformSegmentDetails_ignoresIndexTypesWithoutTheRequirement(): Unit = {
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.ZONEMAP,
+      "idx_id",
+      "zonemap",
+      Seq(segment(Some(Seq(0)), Some(Array[Byte](1)))),
+      Seq(segment(Some(Seq(1)), Some(Array[Byte](2)))))
+  }
+
+  @Test
+  def requireUniformSegmentDetails_defersWhenEitherSideHasNoDetails(): Unit = {
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.INVERTED,
+      "idx_id",
+      "fts",
+      Seq(segment(Some(Seq(0)))),
+      Seq(segment(Some(Seq(1)), Some(Array[Byte](1)))))
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.INVERTED,
+      "idx_id",
+      "fts",
+      Seq.empty,
+      Seq(segment(Some(Seq(1)), Some(Array[Byte](1)))))
+  }
+
+  // ── parseNumSegments ──────────────────────────────────────────────────────
+
+  @Test
+  def parseNumSegments_acceptsPositiveIntegers(): Unit = {
+    assertEquals(
+      8,
+      IndexUtils.parseNumSegments(LanceNamedArgument("num_segments", java.lang.Long.valueOf(8))))
+  }
+
+  @Test
+  def parseNumSegments_rejectsNonPositiveValues(): Unit = {
+    Seq(0L, -1L).foreach { value =>
+      assertThrows(
+        classOf[IllegalArgumentException],
+        () =>
+          IndexUtils.parseNumSegments(
+            LanceNamedArgument("num_segments", java.lang.Long.valueOf(value))))
+    }
+  }
+
+  @Test
+  def parseNumSegments_rejectsValuesWiderThanInt(): Unit = {
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        IndexUtils.parseNumSegments(
+          LanceNamedArgument("num_segments", java.lang.Long.valueOf(Int.MaxValue.toLong + 1))))
+  }
+
+  @Test
+  def parseNumSegments_rejectsNonNumericAndNullValues(): Unit = {
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => IndexUtils.parseNumSegments(LanceNamedArgument("num_segments", "eight")))
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => IndexUtils.parseNumSegments(LanceNamedArgument("num_segments", null)))
+  }
+
 }
