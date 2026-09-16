@@ -42,6 +42,12 @@ case class LanceDropIndexExec(
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       dataset.dropIndex(indexName)
+    } catch {
+      // Add table context while preserving the underlying Lance error.
+      case e: Exception =>
+        throw new RuntimeException(
+          s"DROP INDEX failed for index '$indexName' on table ${ident.toString}",
+          e)
     } finally {
       dataset.close()
     }

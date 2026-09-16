@@ -1728,6 +1728,26 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testDropMissingIndexNamesTableAndIndex() {
+    prepareDataset();
+
+    Exception exception =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(String.format("alter table %s drop index no_such_idx", fullTable))
+                    .collectAsList());
+
+    Assertions.assertTrue(
+        hasMessageInCauseChain(exception, "no_such_idx"),
+        "error should name the index, got: " + exception.getMessage());
+    Assertions.assertTrue(
+        hasMessageInCauseChain(exception, tableName),
+        "error should name the table, got: " + exception.getMessage());
+  }
+
+  @Test
   public void testDropIndexThenRecreate() {
     prepareDataset();
 
