@@ -104,8 +104,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     assertEquals(
         fragments.size(), parts.length, "one task per index segment, no fallback tasks expected");
     for (InputPartition p : parts) {
-      LanceSearchInputPartition sp = (LanceSearchInputPartition) p;
-      assertTrue(sp.isDistributed());
+      LanceDistributedSearchInputPartition sp = (LanceDistributedSearchInputPartition) p;
       assertEquals(1, sp.getIndexSegments().size(), "each unit scans exactly one segment");
       assertTrue(sp.getFragmentIds().isEmpty());
     }
@@ -125,7 +124,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     InputPartition[] parts = planPartitions(table, 10, null, null);
     long indexedUnits =
         java.util.Arrays.stream(parts)
-            .map(LanceSearchInputPartition.class::cast)
+            .map(LanceDistributedSearchInputPartition.class::cast)
             .filter(p -> !p.getIndexSegments().isEmpty())
             .count();
     long fallbackUnits = parts.length - indexedUnits;
@@ -145,7 +144,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     InputPartition[] parts = planPartitions(table, 10, Boolean.TRUE, null);
     assertEquals(indexed.size(), parts.length, "fast_search must not plan fallback units");
     for (InputPartition p : parts) {
-      assertTrue(((LanceSearchInputPartition) p).getFragmentIds().isEmpty());
+      assertTrue(((LanceDistributedSearchInputPartition) p).getFragmentIds().isEmpty());
     }
   }
 
@@ -165,9 +164,9 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     spark.sql("REFRESH TABLE " + table);
 
     InputPartition[] parts = planPartitions(table, 10, null, null);
-    List<LanceSearchInputPartition> units =
+    List<LanceDistributedSearchInputPartition> units =
         java.util.Arrays.stream(parts)
-            .map(LanceSearchInputPartition.class::cast)
+            .map(LanceDistributedSearchInputPartition.class::cast)
             .collect(Collectors.toList());
     long indexedUnits = units.stream().filter(u -> !u.getIndexSegments().isEmpty()).count();
     assertFalse(
@@ -420,16 +419,14 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .filter(filter)
             .fastSearch(fastSearch)
             .build();
-    LanceSearchScan scan =
-        new LanceSearchScan(
-            lanceTable.schema(),
-            query,
-            true,
+    LanceDistributedSearchContext context =
+        new LanceDistributedSearchContext(
             lanceTable.readOptions(),
             lanceTable.getNamespaceImpl(),
             lanceTable.getNamespaceProperties(),
             lanceTable.getInitialStorageOptions());
-    return scan.planInputPartitions();
+    return new LanceDistributedSearchScan(lanceTable.schema(), query, context)
+        .planInputPartitions();
   }
 
   private void assertTopKMatchesReference(String table, int k) {

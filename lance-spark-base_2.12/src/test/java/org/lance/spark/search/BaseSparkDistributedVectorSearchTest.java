@@ -30,12 +30,12 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * Integration tests for distributed VECTOR_SEARCH (the path through {@link LanceSearchTable} with
- * {@code distributed=true}).
+ * Integration tests for distributed VECTOR_SEARCH (the path through {@link
+ * LanceDistributedSearchTable}).
  *
  * <p>These tests cover the fallback-only path: with no vector index built on the table, {@link
- * LanceSearchScan} emits one fallback partition per fragment and each Spark task runs flat KNN.
- * Indexed-unit behavior (IVF_PQ etc.) is intentionally not exercised here yet — see the
+ * LanceDistributedSearchScan} emits one fallback partition per fragment and each Spark task runs
+ * flat KNN. Indexed-unit behavior (IVF_PQ etc.) is intentionally not exercised here yet — see the
  * {@code @Disabled} placeholder at the bottom of this class.
  */
 public abstract class BaseSparkDistributedVectorSearchTest {
@@ -183,8 +183,8 @@ public abstract class BaseSparkDistributedVectorSearchTest {
    *   <li>Build a table large enough for IVF_PQ training (>= 256 rows).
    *   <li>{@code CREATE INDEX ... USING IVF_PQ} on the vector column.
    *   <li>Enable {@code spark.sql.lance.search.distributed.enabled=true}.
-   *   <li>Run VECTOR_SEARCH and assert {@link LanceSearchScan} planned indexed units (one per
-   *       segment) and the merged top-k matches the non-distributed reference run.
+   *   <li>Run VECTOR_SEARCH and assert {@link LanceDistributedSearchScan} planned indexed units
+   *       (one per segment) and the merged top-k matches the non-distributed reference run.
    * </ol>
    */
   @Test

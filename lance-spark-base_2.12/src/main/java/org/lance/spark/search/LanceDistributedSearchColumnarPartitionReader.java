@@ -19,7 +19,8 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.Query;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.internal.LanceFragmentScanner;
+import org.lance.spark.internal.ExecutorNamespace;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.connector.read.PartitionReader;
@@ -42,15 +43,18 @@ import java.util.Locale;
  *
  * and iterates Arrow batches into Spark {@link ColumnarBatch}.
  */
-public class LanceMergedSearchColumnarPartitionReader implements PartitionReader<ColumnarBatch> {
-  private final LanceSearchInputPartition partition;
+public class LanceDistributedSearchColumnarPartitionReader
+    implements PartitionReader<ColumnarBatch> {
+  private final LanceDistributedSearchInputPartition partition;
+  private ExecutorNamespace executorNamespace;
   private Dataset dataset;
   private LanceScanner scanner;
   private ArrowReader reader;
   private ColumnarBatch currentBatch;
   private boolean finished;
 
-  public LanceMergedSearchColumnarPartitionReader(LanceSearchInputPartition partition) {
+  public LanceDistributedSearchColumnarPartitionReader(
+      LanceDistributedSearchInputPartition partition) {
     this.partition = partition;
   }
 
@@ -90,8 +94,9 @@ public class LanceMergedSearchColumnarPartitionReader implements PartitionReader
     first = closeQuietly(reader, first);
     first = closeQuietly(scanner, first);
     first = closeQuietly(dataset, first);
+    first = closeQuietly(executorNamespace, first);
     if (first != null) {
-      throw new IOException("Failed to close LanceMergedSearchColumnarPartitionReader", first);
+      throw new IOException("Failed to close LanceDistributedSearchColumnarPartitionReader", first);
     }
   }
 
@@ -108,12 +113,14 @@ public class LanceMergedSearchColumnarPartitionReader implements PartitionReader
   }
 
   private void openReader() throws IOException {
+    LanceDistributedSearchContext context = partition.getContext();
+    executorNamespace =
+        ExecutorNamespace.acquire(
+            context.getReadOptions(), context.getNamespaceImpl(), context.getNamespaceProperties());
     dataset =
-        LanceFragmentScanner.openDatasetForWorker(
-            partition.getReadOptions(),
-            partition.getNamespaceImpl(),
-            partition.getNamespaceProperties(),
-            partition.getInitialStorageOptions());
+        Utils.openDatasetBuilder(context.getReadOptions())
+            .initialStorageOptions(context.getInitialStorageOptions())
+            .build();
     ScanOptions opts = buildScanOptions(partition);
     try {
       scanner = dataset.newScan(opts);
@@ -124,7 +131,7 @@ public class LanceMergedSearchColumnarPartitionReader implements PartitionReader
     }
   }
 
-  private static ScanOptions buildScanOptions(LanceSearchInputPartition p) {
+  private static ScanOptions buildScanOptions(LanceDistributedSearchInputPartition p) {
     LanceSearchQuery base = p.getQuery();
     String column = base.getVectorColumn();
     if (column == null || column.isEmpty()) {
@@ -217,7 +224,7 @@ public class LanceMergedSearchColumnarPartitionReader implements PartitionReader
     return arr;
   }
 
-  private static String describe(LanceSearchInputPartition p) {
+  private static String describe(LanceDistributedSearchInputPartition p) {
     if (!p.getIndexSegments().isEmpty()) {
       return "indexed segments=" + p.getIndexSegments();
     }
