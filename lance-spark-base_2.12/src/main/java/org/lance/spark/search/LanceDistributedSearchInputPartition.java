@@ -31,45 +31,35 @@ public class LanceDistributedSearchInputPartition implements InputPartition {
 
   private final StructType schema;
   private final LanceSearchQuery query;
-  private final LanceDistributedSearchContext context;
   private final List<Integer> fragmentIds;
   private final List<UUID> indexSegments;
 
   private LanceDistributedSearchInputPartition(
       StructType schema,
       LanceSearchQuery query,
-      LanceDistributedSearchContext context,
       List<Integer> fragmentIds,
       List<UUID> indexSegments) {
     this.schema = schema;
     this.query = query;
-    this.context = Objects.requireNonNull(context, "context");
     this.fragmentIds = fragmentIds;
     this.indexSegments = indexSegments;
   }
 
   /** An indexed unit: search one segment of a vector index through {@code indexSegments(...)}. */
   public static LanceDistributedSearchInputPartition forIndexSegment(
-      StructType schema,
-      LanceSearchQuery query,
-      LanceDistributedSearchContext context,
-      UUID segmentUuid) {
+      StructType schema, LanceSearchQuery query, UUID segmentUuid) {
     return new LanceDistributedSearchInputPartition(
         schema,
         query,
-        context,
         Collections.emptyList(),
         Collections.singletonList(Objects.requireNonNull(segmentUuid, "segmentUuid")));
   }
 
   /** A fallback unit: flat KNN over one fragment no index segment covers. */
   public static LanceDistributedSearchInputPartition forFragment(
-      StructType schema,
-      LanceSearchQuery query,
-      LanceDistributedSearchContext context,
-      int fragmentId) {
+      StructType schema, LanceSearchQuery query, int fragmentId) {
     return new LanceDistributedSearchInputPartition(
-        schema, query, context, Collections.singletonList(fragmentId), Collections.emptyList());
+        schema, query, Collections.singletonList(fragmentId), Collections.emptyList());
   }
 
   public StructType getSchema() {
@@ -78,10 +68,6 @@ public class LanceDistributedSearchInputPartition implements InputPartition {
 
   public LanceSearchQuery getQuery() {
     return query;
-  }
-
-  public LanceDistributedSearchContext getContext() {
-    return context;
   }
 
   public List<Integer> getFragmentIds() {

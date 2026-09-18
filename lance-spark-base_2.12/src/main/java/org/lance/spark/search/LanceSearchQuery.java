@@ -18,6 +18,7 @@ import org.lance.namespace.model.QueryTableRequestColumns;
 import org.lance.namespace.model.QueryTableRequestFullTextQuery;
 import org.lance.namespace.model.QueryTableRequestVector;
 import org.lance.namespace.model.StringFtsQuery;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.FullTextQueryConverter;
 import org.lance.spark.utils.FullTextQueryUtils;
 
@@ -40,6 +41,8 @@ public class LanceSearchQuery implements Serializable {
   private final List<String> tableId;
   private final String namespaceImpl;
   private final Map<String, String> namespaceProperties;
+  private final LanceSparkReadOptions readOptions;
+  private final Map<String, String> initialStorageOptions;
   private final List<String> outputColumns;
   private final Integer k;
   private final Integer offset;
@@ -66,6 +69,8 @@ public class LanceSearchQuery implements Serializable {
     this.tableId = immutableList(builder.tableId);
     this.namespaceImpl = builder.namespaceImpl;
     this.namespaceProperties = immutableMap(builder.namespaceProperties);
+    this.readOptions = builder.readOptions;
+    this.initialStorageOptions = immutableMap(builder.initialStorageOptions);
     this.outputColumns = immutableList(builder.outputColumns);
     this.k = builder.k;
     this.offset = builder.offset;
@@ -106,6 +111,20 @@ public class LanceSearchQuery implements Serializable {
 
   public Map<String, String> getNamespaceProperties() {
     return namespaceProperties;
+  }
+
+  /**
+   * Read options for opening the dataset outside the driver. Only the distributed search path needs
+   * them; a search served by {@code LanceNamespace.queryTable} never opens the dataset and leaves
+   * this unset.
+   */
+  public LanceSparkReadOptions getReadOptions() {
+    return readOptions;
+  }
+
+  /** Storage options the driver already obtained, merged into the dataset open. */
+  public Map<String, String> getInitialStorageOptions() {
+    return initialStorageOptions;
   }
 
   public List<String> getOutputColumns() {
@@ -273,6 +292,8 @@ public class LanceSearchQuery implements Serializable {
     private List<String> tableId = Collections.emptyList();
     private String namespaceImpl;
     private Map<String, String> namespaceProperties = Collections.emptyMap();
+    private LanceSparkReadOptions readOptions;
+    private Map<String, String> initialStorageOptions = Collections.emptyMap();
     private List<String> outputColumns = Collections.emptyList();
     private Integer k = 10;
     private Integer offset;
@@ -310,6 +331,17 @@ public class LanceSearchQuery implements Serializable {
 
     public Builder namespaceProperties(Map<String, String> namespaceProperties) {
       this.namespaceProperties = namespaceProperties;
+      return this;
+    }
+
+    /** Required for distributed search, which opens the dataset itself; unused otherwise. */
+    public Builder readOptions(LanceSparkReadOptions readOptions) {
+      this.readOptions = readOptions;
+      return this;
+    }
+
+    public Builder initialStorageOptions(Map<String, String> initialStorageOptions) {
+      this.initialStorageOptions = initialStorageOptions;
       return this;
     }
 

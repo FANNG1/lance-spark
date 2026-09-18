@@ -76,6 +76,10 @@ object LanceSearchTableFunctions {
       .tableId(resolved.table.readOptions().getTableId)
       .namespaceImpl(resolved.table.getNamespaceImpl)
       .namespaceProperties(resolved.table.getNamespaceProperties)
+      // Only the distributed path reads these: it opens the dataset itself instead of asking the
+      // namespace to run the search.
+      .readOptions(resolved.table.readOptions())
+      .initialStorageOptions(resolved.table.getInitialStorageOptions)
       .outputColumns(requestColumns.asJava)
       .vector(queryVector.asJava)
       .topK(requestK)
@@ -295,13 +299,8 @@ object LanceSearchTableFunctions {
       schema: StructType,
       query: LanceSearchQuery,
       resolved: ResolvedLanceTable): LogicalPlan = {
-    val context = new LanceDistributedSearchContext(
-      resolved.table.readOptions(),
-      resolved.table.getNamespaceImpl,
-      resolved.table.getNamespaceProperties,
-      resolved.table.getInitialStorageOptions)
     val rel = DataSourceV2Relation.create(
-      new LanceDistributedSearchTable(functionName, schema, query, context),
+      new LanceDistributedSearchTable(functionName, schema, query),
       Some(resolved.catalog),
       Some(resolved.identifier),
       CaseInsensitiveStringMap.empty())
