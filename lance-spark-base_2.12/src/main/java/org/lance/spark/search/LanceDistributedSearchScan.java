@@ -146,23 +146,21 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       Optional<VectorIndexInfo> vectorIndex,
       boolean fastSearch) {
     List<LanceDistributedSearchInputPartition> units = new ArrayList<>();
-    Set<Integer> indexedFragments = new HashSet<>();
+    // Fragments still waiting for an owner; each index segment claims the ones it covers.
+    Set<Integer> uncovered = new TreeSet<>(existingFragments);
     if (vectorIndex.isPresent()) {
       for (VectorIndexSegment segment : vectorIndex.get().getSegments()) {
-        Set<Integer> covered = new HashSet<>(segment.getFragmentIds());
-        covered.retainAll(existingFragments);
-        if (covered.isEmpty()) {
+        // A segment whose fragments are all gone (compaction, deletion) is stale: no unit for it.
+        if (Collections.disjoint(segment.getFragmentIds(), existingFragments)) {
           continue;
         }
-        indexedFragments.addAll(covered);
+        uncovered.removeAll(segment.getFragmentIds());
         units.add(
             LanceDistributedSearchInputPartition.forIndexSegment(
                 schema, resolvedQuery, segment.getUuid()));
       }
     }
     if (!fastSearch) {
-      Set<Integer> uncovered = new TreeSet<>(existingFragments);
-      uncovered.removeAll(indexedFragments);
       for (Integer fragmentId : uncovered) {
         units.add(
             LanceDistributedSearchInputPartition.forFragment(schema, resolvedQuery, fragmentId));
