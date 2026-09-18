@@ -13,25 +13,24 @@
  */
 package org.lance.spark.search;
 
-import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.read.ScanBuilder;
 import org.apache.spark.sql.types.StructType;
 
-public class LanceSearchInputPartition implements InputPartition {
-  private static final long serialVersionUID = -38612098237192389L;
-
+public class LanceDistributedSearchScanBuilder implements ScanBuilder {
   private final StructType schema;
   private final LanceSearchQuery query;
+  private final LanceDistributedSearchContext context;
 
-  public LanceSearchInputPartition(StructType schema, LanceSearchQuery query) {
+  public LanceDistributedSearchScanBuilder(
+      StructType schema, LanceSearchQuery query, LanceDistributedSearchContext context) {
     this.schema = schema;
     this.query = query;
+    this.context = context;
   }
 
-  public StructType getSchema() {
-    return schema;
-  }
-
-  public LanceSearchQuery getQuery() {
-    return query;
+  @Override
+  public Scan build() {
+    return new LanceDistributedSearchScan(schema, query, context);
   }
 }

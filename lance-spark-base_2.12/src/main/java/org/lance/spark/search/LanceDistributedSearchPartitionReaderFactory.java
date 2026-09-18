@@ -21,20 +21,18 @@ import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
-public class LanceSearchPartitionReaderFactory implements PartitionReaderFactory {
-  private static final long serialVersionUID = -812739812739817239L;
+public class LanceDistributedSearchPartitionReaderFactory implements PartitionReaderFactory {
+  private static final long serialVersionUID = -613298471029384756L;
 
   @Override
   public PartitionReader<InternalRow> createReader(InputPartition partition) {
-    LanceRuntime.enableOpenTelemetry();
-    return new LanceSearchRowPartitionReader(
-        new LanceSearchColumnarPartitionReader(asSearchPartition(partition)));
+    return new LanceSearchRowPartitionReader(createColumnarReader(partition));
   }
 
   @Override
   public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
     LanceRuntime.enableOpenTelemetry();
-    return new LanceSearchColumnarPartitionReader(asSearchPartition(partition));
+    return new LanceDistributedSearchColumnarPartitionReader(asDistributedPartition(partition));
   }
 
   @Override
@@ -42,11 +40,11 @@ public class LanceSearchPartitionReaderFactory implements PartitionReaderFactory
     return true;
   }
 
-  private LanceSearchInputPartition asSearchPartition(InputPartition partition) {
-    if (!(partition instanceof LanceSearchInputPartition)) {
+  private LanceDistributedSearchInputPartition asDistributedPartition(InputPartition partition) {
+    if (!(partition instanceof LanceDistributedSearchInputPartition)) {
       throw new IllegalArgumentException(
-          "Unknown InputPartition type. Expecting LanceSearchInputPartition");
+          "Unknown InputPartition type. Expecting LanceDistributedSearchInputPartition");
     }
-    return (LanceSearchInputPartition) partition;
+    return (LanceDistributedSearchInputPartition) partition;
   }
 }
