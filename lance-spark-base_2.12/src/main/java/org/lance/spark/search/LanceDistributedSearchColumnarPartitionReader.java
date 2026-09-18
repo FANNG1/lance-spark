@@ -113,13 +113,13 @@ public class LanceDistributedSearchColumnarPartitionReader
   }
 
   private void openReader() throws IOException {
-    LanceDistributedSearchContext context = partition.getContext();
+    LanceSearchQuery query = partition.getQuery();
     executorNamespace =
         ExecutorNamespace.acquire(
-            context.getReadOptions(), context.getNamespaceImpl(), context.getNamespaceProperties());
+            query.getReadOptions(), query.getNamespaceImpl(), query.getNamespaceProperties());
     dataset =
-        Utils.openDatasetBuilder(context.getReadOptions())
-            .initialStorageOptions(context.getInitialStorageOptions())
+        Utils.openDatasetBuilder(query.getReadOptions())
+            .initialStorageOptions(query.getInitialStorageOptions())
             .build();
     ScanOptions opts = buildScanOptions(partition);
     try {

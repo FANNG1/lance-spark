@@ -20,17 +20,14 @@ import org.apache.spark.sql.types.StructType;
 public class LanceDistributedSearchScanBuilder implements ScanBuilder {
   private final StructType schema;
   private final LanceSearchQuery query;
-  private final LanceDistributedSearchContext context;
 
-  public LanceDistributedSearchScanBuilder(
-      StructType schema, LanceSearchQuery query, LanceDistributedSearchContext context) {
+  public LanceDistributedSearchScanBuilder(StructType schema, LanceSearchQuery query) {
     this.schema = schema;
     this.query = query;
-    this.context = context;
   }
 
   @Override
   public Scan build() {
-    return new LanceDistributedSearchScan(schema, query, context);
+    return new LanceDistributedSearchScan(schema, query);
   }
 }

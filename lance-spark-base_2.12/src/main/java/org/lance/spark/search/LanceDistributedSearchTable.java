@@ -20,7 +20,6 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.Collections;
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -34,22 +33,16 @@ public class LanceDistributedSearchTable implements SupportsRead {
   private final String name;
   private final StructType schema;
   private final LanceSearchQuery query;
-  private final LanceDistributedSearchContext context;
 
-  public LanceDistributedSearchTable(
-      String name,
-      StructType schema,
-      LanceSearchQuery query,
-      LanceDistributedSearchContext context) {
+  public LanceDistributedSearchTable(String name, StructType schema, LanceSearchQuery query) {
     this.name = name;
     this.schema = schema;
     this.query = query;
-    this.context = Objects.requireNonNull(context, "context");
   }
 
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap options) {
-    return new LanceDistributedSearchScanBuilder(schema, query, context);
+    return new LanceDistributedSearchScanBuilder(schema, query);
   }
 
   @Override

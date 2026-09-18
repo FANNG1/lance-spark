@@ -40,6 +40,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
@@ -70,13 +71,12 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
 
   private final StructType schema;
   private final LanceSearchQuery query;
-  private final LanceDistributedSearchContext context;
 
-  public LanceDistributedSearchScan(
-      StructType schema, LanceSearchQuery query, LanceDistributedSearchContext context) {
+  public LanceDistributedSearchScan(StructType schema, LanceSearchQuery query) {
+    Objects.requireNonNull(
+        query.getReadOptions(), "query.readOptions is required for distributed search");
     this.schema = schema;
     this.query = query;
-    this.context = context;
   }
 
   @Override
@@ -102,8 +102,8 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   @Override
   public InputPartition[] planInputPartitions() {
     Dataset dataset =
-        Utils.openDatasetBuilder(context.getReadOptions())
-            .initialStorageOptions(context.getInitialStorageOptions())
+        Utils.openDatasetBuilder(query.getReadOptions())
+            .initialStorageOptions(query.getInitialStorageOptions())
             .build();
     try {
       Set<Integer> existingFragments = new HashSet<>();
@@ -157,7 +157,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
         indexedFragments.addAll(covered);
         units.add(
             LanceDistributedSearchInputPartition.forIndexSegment(
-                schema, resolvedQuery, context, segment.getUuid()));
+                schema, resolvedQuery, segment.getUuid()));
       }
     }
     if (!fastSearch) {
@@ -165,8 +165,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       uncovered.removeAll(indexedFragments);
       for (Integer fragmentId : uncovered) {
         units.add(
-            LanceDistributedSearchInputPartition.forFragment(
-                schema, resolvedQuery, context, fragmentId));
+            LanceDistributedSearchInputPartition.forFragment(schema, resolvedQuery, fragmentId));
       }
     }
     return units;
@@ -242,6 +241,8 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
         .tableId(base.getTableId())
         .namespaceImpl(base.getNamespaceImpl())
         .namespaceProperties(base.getNamespaceProperties())
+        .readOptions(base.getReadOptions())
+        .initialStorageOptions(base.getInitialStorageOptions())
         .outputColumns(base.getOutputColumns())
         .topK(base.getK())
         .offset(base.getOffset())

@@ -411,6 +411,8 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .tableId(lanceTable.readOptions().getTableId())
             .namespaceImpl(lanceTable.getNamespaceImpl())
             .namespaceProperties(lanceTable.getNamespaceProperties())
+            .readOptions(lanceTable.readOptions())
+            .initialStorageOptions(lanceTable.getInitialStorageOptions())
             .outputColumns(Collections.singletonList("id"))
             .vector(queryVector)
             .topK(k)
@@ -419,14 +421,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .filter(filter)
             .fastSearch(fastSearch)
             .build();
-    LanceDistributedSearchContext context =
-        new LanceDistributedSearchContext(
-            lanceTable.readOptions(),
-            lanceTable.getNamespaceImpl(),
-            lanceTable.getNamespaceProperties(),
-            lanceTable.getInitialStorageOptions());
-    return new LanceDistributedSearchScan(lanceTable.schema(), query, context)
-        .planInputPartitions();
+    return new LanceDistributedSearchScan(lanceTable.schema(), query).planInputPartitions();
   }
 
   private void assertTopKMatchesReference(String table, int k) {
