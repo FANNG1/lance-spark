@@ -67,6 +67,19 @@ public class LanceStatistics implements Statistics, Serializable {
     return new LanceStatistics((long) (totalRows * ratio), (long) (totalFilesSize * ratio));
   }
 
+  /** Estimates post-pruning statistics using exact surviving rows and row-weighted bytes. */
+  static LanceStatistics estimatePostPruningByRows(
+      long totalRows, long totalFilesSize, long survivingRows) {
+    if (totalRows <= 0 || survivingRows >= totalRows) {
+      return new LanceStatistics(totalRows, totalFilesSize);
+    }
+    if (survivingRows <= 0) {
+      return new LanceStatistics(0, 0);
+    }
+    double ratio = (double) survivingRows / totalRows;
+    return new LanceStatistics(survivingRows, (long) (totalFilesSize * ratio));
+  }
+
   /**
    * Estimate post-projection size using {@code sizeInBytes × (projectedWidths / fullWidths)}, the
    * same formula Spark's DSv2 {@code FileScan.estimateStatistics} applies after column pruning (see
