@@ -44,9 +44,11 @@ ENV SCALA_VERSION=${SCALA_VERSION}
 ENV LANCE_SPARK_VERSION=0.6.1
 ENV LANCE_NS_IMPL_VERSION=0.4.0
 
-# Download spark
+# Download spark (dlcdn only keeps the latest patch of each line, so fall back
+# to the archive mirror for pinned/older versions)
 RUN mkdir -p ${SPARK_HOME} \
- && curl -fL https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz -o spark.tgz \
+ && ( curl -fL https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz -o spark.tgz \
+      || curl -fL https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz -o spark.tgz ) \
  && tar xvzf spark.tgz --directory /opt/spark --strip-components 1 \
  && rm -rf spark.tgz
 
