@@ -33,6 +33,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -83,9 +84,11 @@ public class LanceFragmentScanner implements AutoCloseable {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
       long dsOpenStart = System.nanoTime();
       dataset =
-          Utils.openDatasetBuilder(readOptions)
-              .initialStorageOptions(inputPartition.getInitialStorageOptions())
-              .build();
+          openDatasetForWorker(
+              readOptions,
+              inputPartition.getNamespaceImpl(),
+              inputPartition.getNamespaceProperties(),
+              inputPartition.getInitialStorageOptions());
       long dsOpenTimeNs = System.nanoTime() - dsOpenStart;
       Fragment fragment = dataset.getFragment(fragmentId);
       if (fragment == null) {
@@ -168,6 +171,34 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
       throw new RuntimeException(throwable);
     }
+  }
+
+  /**
+   * Open a Lance dataset on a worker, reusing the same credential-refresh logic that {@link
+   * #create(int, LanceInputPartition)} applies. Used by both the read scan path (via {@code
+   * create}) and the distributed search worker.
+   *
+   * @param readOptions read options carrying URI, version, and (optionally) namespace info
+   * @param namespaceImpl namespace implementation type, may be null
+   * @param namespaceProperties namespace properties, may be null
+   * @param initialStorageOptions storage options vended by the driver, may be null
+   */
+  public static Dataset openDatasetForWorker(
+      LanceSparkReadOptions readOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      Map<String, String> initialStorageOptions) {
+    if (namespaceImpl != null && readOptions.isExecutorCredentialRefresh()) {
+      if (LanceRuntime.useNamespaceOnWorkers(namespaceImpl)) {
+        readOptions.setNamespace(
+            LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties));
+      } else {
+        readOptions.setNamespace(null);
+      }
+    }
+    return Utils.openDatasetBuilder(readOptions)
+        .initialStorageOptions(initialStorageOptions)
+        .build();
   }
 
   /**
