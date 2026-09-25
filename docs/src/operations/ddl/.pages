@@ -13,6 +13,7 @@ nav:
   - drop-table.md
   - create-index.md
   - drop-index.md
+  - refresh-index.md
   - show-indexes.md
   - optimize-index.md
   - create-branch.md
