@@ -97,6 +97,7 @@ object LanceSearchTableFunctions {
       .bypassVectorIndex(optionalBoolean(parsed, "bypass_vector_index").orNull)
       .fastSearch(optionalBoolean(parsed, "fast_search").orNull)
       .prefilter(optionalBoolean(parsed, "prefilter").orNull)
+      .oversampleFactor(optionalFloat(parsed, "oversample_factor").orNull)
 
     relation("VECTOR_SEARCH", schema, builder.build(), resolved)
   }
@@ -330,10 +331,18 @@ object LanceSearchTableFunctions {
 
   private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
     val spark = SparkSession.active
-    val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "true").toBoolean
+    val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "false").toBoolean
     if (!enabled) return false
     if (query.getSearchType != SearchType.VECTOR) return false
-    if (java.lang.Boolean.TRUE == query.getBypassVectorIndex) return false
+    if (query.getSearchType == SearchType.VECTOR &&
+      java.lang.Boolean.TRUE == query.getBypassVectorIndex &&
+      java.lang.Boolean.TRUE == query.getFastSearch) {
+      throw new IllegalArgumentException(
+        "bypass_vector_index and fast_search cannot both be true")
+    }
+    // lance-core's Java scanner cannot apply distance bounds yet. Keep these queries on the
+    // namespace path so distributed execution never silently changes their semantics.
+    if (query.getLowerBound != null || query.getUpperBound != null) return false
     true
   }
 

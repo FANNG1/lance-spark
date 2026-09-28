@@ -56,6 +56,7 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `offset` | Integer | No | Number of results to skip. Lance Spark requests `num_results + offset` rows from Lance before applying the offset. |
 | `version` | Long | No | Lance table version to search. |
 | `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters. |
+| `oversample_factor` | Float | No | Distributed search candidates per task are `ceil((num_results + offset) * oversample_factor)`. Defaults to `1.0`; larger values can improve global recall at the cost of more executor work and shuffle traffic. |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
 | `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. |
 
@@ -65,7 +66,10 @@ The result includes the requested table columns and a nullable `_distance` float
 
 ## Execution
 
-Spark plans `VECTOR_SEARCH` as a DataSource V2 batch read with one input partition. The partition reader calls the Lance namespace `queryTable` API. With a directory namespace the search runs in the Spark process executing that reader; with a REST namespace the REST server handles the namespace request.
+By default, Spark plans `VECTOR_SEARCH` with one input partition and calls the Lance namespace
+`queryTable` API. When `spark.sql.lance.search.distributed.enabled=true`, Spark instead opens the
+dataset from its executors, searches vector-index segments and uncovered fragments in parallel,
+and globally merges their candidates. `oversample_factor` applies only to this distributed path.
 
 ## Validation
 

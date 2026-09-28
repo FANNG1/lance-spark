@@ -46,6 +46,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -150,6 +151,118 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
+  void bypassVectorIndexPlansOnlyFallbackFragments() throws Exception {
+    String table = createTable("idx_bypass", 4);
+    List<Integer> fragments = fragmentIds(table);
+    buildSegmentPerFragment(table, fragments);
+
+    InputPartition[] parts = planPartitions(table, 10, null, null, null, true);
+    assertEquals(fragments.size(), parts.length);
+    for (InputPartition part : parts) {
+      LanceDistributedSearchInputPartition searchPart = (LanceDistributedSearchInputPartition) part;
+      assertTrue(searchPart.getIndexSegments().isEmpty());
+      assertEquals(1, searchPart.getFragmentIds().size());
+    }
+
+    String sql = vectorSearchSql(table, 5, ", bypass_vector_index => true");
+    assertEquals(java.util.Arrays.asList(0, 1, 2, 3, 4), ids(collect(sql, true)));
+  }
+
+  @Test
+  void bypassVectorIndexConflictsWithFastSearch() throws Exception {
+    String table = createTable("idx_bypass_fast", 1);
+    String sql = vectorSearchSql(table, 5, ", bypass_vector_index => true, fast_search => true");
+    Exception error = assertThrows(Exception.class, () -> collect(sql, true));
+    assertTrue(rootMessage(error).contains("cannot both be true"), rootMessage(error));
+  }
+
+  @Test
+  void explicitMetricMismatchFallsBackInsteadOfForcingIndex() throws Exception {
+    String table = createTable("idx_metric_mismatch", 4);
+    List<Integer> fragments = fragmentIds(table);
+    buildSegmentPerFragment(table, fragments, DistanceType.Cosine);
+
+    InputPartition[] parts = planPartitions(table, 10, null, null, "l2", false);
+    assertEquals(fragments.size(), parts.length);
+    for (InputPartition part : parts) {
+      assertTrue(((LanceDistributedSearchInputPartition) part).getIndexSegments().isEmpty());
+    }
+
+    Exception error =
+        assertThrows(Exception.class, () -> planPartitions(table, 10, true, null, "l2", false));
+    assertTrue(rootMessage(error).contains("fast_search cannot use"), rootMessage(error));
+  }
+
+  @Test
+  void omittedMetricUsesCosineForIndexedAndFallbackUnits() throws Exception {
+    String table = createAngularTable("idx_implicit_cosine");
+    List<Integer> fragments = fragmentIds(table);
+    buildSegmentPerFragment(table, fragments.subList(0, fragments.size() - 1), DistanceType.Cosine);
+
+    InputPartition[] parts = planPartitions(table, 3, null, null);
+    for (InputPartition part : parts) {
+      assertEquals(
+          "cosine",
+          ((LanceDistributedSearchInputPartition) part).getQuery().getDistanceType(),
+          "the resolved index metric must be sent to indexed and fallback tasks");
+    }
+
+    String sql =
+        "SELECT id, _distance FROM VECTOR_SEARCH(table => '"
+            + table
+            + "', query_vector => array(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), "
+            + "k => 3, nprobes => "
+            + NUM_PARTITIONS
+            + ")";
+    List<Row> reference = collect(sql, false);
+    List<Row> distributed = collect(sql, true);
+    assertEquals(ids(reference), ids(distributed));
+    assertEquals(192, distributed.get(0).getInt(0), "nearest row is in the fallback fragment");
+    for (int i = 0; i < reference.size(); i++) {
+      assertEquals(reference.get(i).getFloat(1), distributed.get(i).getFloat(1), 1e-3f);
+    }
+  }
+
+  @Test
+  void plannedPartitionsPinTheOpenedDatasetVersion() throws Exception {
+    String table = createTable("idx_snapshot", 2);
+    long plannedVersion;
+    try (Dataset ds = openDataset(table)) {
+      plannedVersion = ds.version();
+    }
+
+    InputPartition[] parts = planPartitions(table, 3, null, null);
+    assertTrue(parts.length > 0);
+    for (InputPartition part : parts) {
+      Long pinned =
+          ((LanceDistributedSearchInputPartition) part)
+              .getQuery()
+              .getReadOptions()
+              .getRef()
+              .getVersionNumber()
+              .get();
+      assertEquals(plannedVersion, pinned.longValue());
+    }
+
+    spark.sql(
+        "INSERT INTO " + table + " VALUES (9999, array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))");
+    try (Dataset ds = openDataset(table)) {
+      assertTrue(ds.version() > plannedVersion);
+    }
+    for (InputPartition part : parts) {
+      assertEquals(
+          plannedVersion,
+          ((LanceDistributedSearchInputPartition) part)
+              .getQuery()
+              .getReadOptions()
+              .getRef()
+              .getVersionNumber()
+              .get()
+              .longValue());
+    }
+  }
+
+  @Test
   void wholeTableIndexIsActuallyUsedByThePlanner() throws Exception {
     String table = createTable("idx_whole", 4);
     // A regular, non-segmented index over the whole table - what a normal CREATE INDEX produces.
@@ -188,6 +301,24 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     List<Row> distributed = collect(sql, true);
     List<Row> reference = collect(sql, false);
     assertEquals(ids(reference), ids(distributed), "offset results must match the reference path");
+  }
+
+  @Test
+  void oversampleFactorIncreasesEachTasksCandidateCount() throws Exception {
+    String table = createTable("idx_oversample", 2);
+    buildSegmentPerFragment(table, fragmentIds(table));
+
+    InputPartition[] parts = planPartitions(table, 7, null, null, null, false, 1.5f);
+    assertTrue(parts.length > 1);
+    for (InputPartition part : parts) {
+      assertEquals(
+          11,
+          ((LanceDistributedSearchInputPartition) part).getQuery().getK(),
+          "ceil(7 * 1.5) candidates should be requested from every task");
+    }
+
+    String sql = vectorSearchSql(table, 7, ", oversample_factor => 1.5");
+    assertEquals(ids(collect(sql, false)), ids(collect(sql, true)));
   }
 
   @Test
@@ -326,6 +457,48 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     return fullName;
   }
 
+  private String createAngularTable(String name) {
+    String fullName = CATALOG_NAME + ".default." + name;
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL, "
+            + VECTOR_COLUMN
+            + " ARRAY<FLOAT> NOT NULL) USING lance "
+            + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '"
+            + DIM
+            + "')");
+    for (int fragment = 0; fragment < 4; fragment++) {
+      int start = fragment * ROWS_PER_INSERT;
+      int angle = fragment == 3 ? 10 : 20 + fragment * 15;
+      int scale = fragment == 3 ? 100 : 1;
+      spark.sql(
+          "INSERT INTO "
+              + fullName
+              + " SELECT CAST(id AS INT), array("
+              + "CAST("
+              + scale
+              + " * cos(radians(CASE WHEN id = "
+              + start
+              + " THEN "
+              + angle
+              + " ELSE 80 END)) AS FLOAT), "
+              + "CAST("
+              + scale
+              + " * sin(radians(CASE WHEN id = "
+              + start
+              + " THEN "
+              + angle
+              + " ELSE 80 END)) AS FLOAT), "
+              + "0.0, 0.0, 0.0, 0.0, 0.0, 0.0) FROM range("
+              + start
+              + ", "
+              + (start + ROWS_PER_INSERT)
+              + ", 1, 1)");
+    }
+    return fullName;
+  }
+
   /** Query vector sits at the origin, so the top-k by L2 is simply ids 0, 1, 2, ... */
   private String queryVectorSql() {
     List<String> zeros = new ArrayList<>();
@@ -362,6 +535,10 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   private IndexParams indexParams(Dataset ds) {
+    return indexParams(ds, DistanceType.L2);
+  }
+
+  private IndexParams indexParams(Dataset ds, DistanceType distanceType) {
     IvfBuildParams trainParams =
         new IvfBuildParams.Builder().setNumPartitions(NUM_PARTITIONS).setMaxIters(2).build();
     float[] centroids = VectorTrainer.trainIvfCentroids(ds, VECTOR_COLUMN, trainParams);
@@ -373,15 +550,20 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .build();
     return IndexParams.builder()
         .setVectorIndexParams(
-            new VectorIndexParams.Builder(ivfParams).setDistanceType(DistanceType.L2).build())
+            new VectorIndexParams.Builder(ivfParams).setDistanceType(distanceType).build())
         .build();
   }
 
   /** Builds one index segment per given fragment and commits them as a single named index. */
   private List<Index> buildSegmentPerFragment(String table, List<Integer> fragments)
       throws Exception {
+    return buildSegmentPerFragment(table, fragments, DistanceType.L2);
+  }
+
+  private List<Index> buildSegmentPerFragment(
+      String table, List<Integer> fragments, DistanceType distanceType) throws Exception {
     try (Dataset ds = openDataset(table)) {
-      IndexParams params = indexParams(ds);
+      IndexParams params = indexParams(ds, distanceType);
       List<Index> segments = new ArrayList<>();
       for (Integer fragmentId : fragments) {
         segments.add(
@@ -402,6 +584,29 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   /** Plans the distributed scan on the driver, without running a Spark job. */
   private InputPartition[] planPartitions(String table, int k, Boolean fastSearch, String filter)
       throws Exception {
+    return planPartitions(table, k, fastSearch, filter, null, false);
+  }
+
+  private InputPartition[] planPartitions(
+      String table,
+      int k,
+      Boolean fastSearch,
+      String filter,
+      String distanceType,
+      boolean bypassVectorIndex)
+      throws Exception {
+    return planPartitions(table, k, fastSearch, filter, distanceType, bypassVectorIndex, null);
+  }
+
+  private InputPartition[] planPartitions(
+      String table,
+      int k,
+      Boolean fastSearch,
+      String filter,
+      String distanceType,
+      boolean bypassVectorIndex,
+      Float oversampleFactor)
+      throws Exception {
     LanceDataset lanceTable = lanceTable(table);
     List<Float> queryVector = new ArrayList<>();
     for (int i = 0; i < DIM; i++) {
@@ -419,8 +624,11 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .topK(k)
             .vectorColumn(VECTOR_COLUMN)
             .nprobes(NUM_PARTITIONS)
+            .distanceType(distanceType)
             .filter(filter)
             .fastSearch(fastSearch)
+            .bypassVectorIndex(bypassVectorIndex)
+            .oversampleFactor(oversampleFactor)
             .build();
     return new LanceDistributedSearchScan(lanceTable.schema(), query).planInputPartitions();
   }
@@ -438,7 +646,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   private String vectorSearchSql(String table, int k, String extraNamedArgs) {
-    return "SELECT id FROM VECTOR_SEARCH(table => '"
+    return "SELECT id, _distance FROM VECTOR_SEARCH(table => '"
         + table
         + "', query_vector => "
         + queryVectorSql()
@@ -456,6 +664,14 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   private List<Integer> ids(List<Row> rows) {
-    return rows.stream().map(r -> r.getInt(0)).sorted().collect(Collectors.toList());
+    return rows.stream().map(r -> r.getInt(0)).collect(Collectors.toList());
+  }
+
+  private String rootMessage(Throwable throwable) {
+    Throwable root = throwable;
+    while (root.getCause() != null) {
+      root = root.getCause();
+    }
+    return String.valueOf(root.getMessage());
   }
 }

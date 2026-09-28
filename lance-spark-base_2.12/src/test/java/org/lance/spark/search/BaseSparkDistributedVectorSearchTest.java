@@ -173,6 +173,23 @@ public abstract class BaseSparkDistributedVectorSearchTest {
     assertEquals(0.0f, rows.get(0).getFloat(1), 1e-4f);
   }
 
+  @Test
+  void distanceBoundsStayOnNamespacePath() {
+    String fullName = createFiveFragmentTable();
+    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    List<Row> rows =
+        spark
+            .sql(
+                "SELECT id, _distance FROM VECTOR_SEARCH(table => '"
+                    + fullName
+                    + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 5, "
+                    + "lower_bound => 0.5, upper_bound => 5.0)")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals(4.0f, rows.get(0).getFloat(1), 1e-4f);
+  }
+
   /**
    * TODO: end-to-end coverage for indexed-unit path with IVF_PQ.
    *

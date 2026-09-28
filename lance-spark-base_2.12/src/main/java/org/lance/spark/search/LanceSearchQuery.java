@@ -60,6 +60,7 @@ public class LanceSearchQuery implements Serializable {
   private final Boolean bypassVectorIndex;
   private final Boolean fastSearch;
   private final Boolean prefilter;
+  private final Float oversampleFactor;
   private final String textQuery;
   private final List<String> searchColumns;
   private final String fullTextQueryJson;
@@ -88,6 +89,7 @@ public class LanceSearchQuery implements Serializable {
     this.bypassVectorIndex = builder.bypassVectorIndex;
     this.fastSearch = builder.fastSearch;
     this.prefilter = builder.prefilter;
+    this.oversampleFactor = builder.oversampleFactor;
     this.textQuery = builder.textQuery;
     this.searchColumns = immutableList(builder.searchColumns);
     this.fullTextQueryJson = builder.fullTextQueryJson;
@@ -95,6 +97,11 @@ public class LanceSearchQuery implements Serializable {
 
   public static Builder builder(SearchType searchType) {
     return new Builder(searchType);
+  }
+
+  /** Returns a builder initialized with every field of this query. */
+  public Builder toBuilder() {
+    return new Builder(this);
   }
 
   public SearchType getSearchType() {
@@ -195,12 +202,20 @@ public class LanceSearchQuery implements Serializable {
     return prefilter;
   }
 
+  public Float getOversampleFactor() {
+    return oversampleFactor;
+  }
+
   public String getTextQuery() {
     return textQuery;
   }
 
   public List<String> getSearchColumns() {
     return searchColumns;
+  }
+
+  public String getFullTextQueryJson() {
+    return fullTextQueryJson;
   }
 
   public QueryTableRequest toQueryTableRequest() {
@@ -311,12 +326,43 @@ public class LanceSearchQuery implements Serializable {
     private Boolean bypassVectorIndex;
     private Boolean fastSearch;
     private Boolean prefilter;
+    private Float oversampleFactor;
     private String textQuery;
     private List<String> searchColumns = Collections.emptyList();
     private String fullTextQueryJson;
 
     private Builder(SearchType searchType) {
       this.searchType = searchType;
+    }
+
+    private Builder(LanceSearchQuery query) {
+      this.searchType = query.searchType;
+      this.tableId = query.tableId;
+      this.namespaceImpl = query.namespaceImpl;
+      this.namespaceProperties = query.namespaceProperties;
+      this.readOptions = query.readOptions;
+      this.initialStorageOptions = query.initialStorageOptions;
+      this.outputColumns = query.outputColumns;
+      this.k = query.k;
+      this.offset = query.offset;
+      this.version = query.version;
+      this.filter = query.filter;
+      this.withRowId = query.withRowId;
+      this.vector = query.vector;
+      this.vectorColumn = query.vectorColumn;
+      this.distanceType = query.distanceType;
+      this.nprobes = query.nprobes;
+      this.ef = query.ef;
+      this.refineFactor = query.refineFactor;
+      this.lowerBound = query.lowerBound;
+      this.upperBound = query.upperBound;
+      this.bypassVectorIndex = query.bypassVectorIndex;
+      this.fastSearch = query.fastSearch;
+      this.prefilter = query.prefilter;
+      this.oversampleFactor = query.oversampleFactor;
+      this.textQuery = query.textQuery;
+      this.searchColumns = query.searchColumns;
+      this.fullTextQueryJson = query.fullTextQueryJson;
     }
 
     public Builder tableId(List<String> tableId) {
@@ -430,6 +476,11 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
+    public Builder oversampleFactor(Float oversampleFactor) {
+      this.oversampleFactor = oversampleFactor;
+      return this;
+    }
+
     public Builder textQuery(String textQuery) {
       this.textQuery = textQuery;
       return this;
@@ -461,6 +512,10 @@ public class LanceSearchQuery implements Serializable {
       }
       if (offset != null && offset < 0) {
         throw new IllegalArgumentException("offset must be non-negative");
+      }
+      if (oversampleFactor != null
+          && (!Float.isFinite(oversampleFactor) || oversampleFactor < 1.0f)) {
+        throw new IllegalArgumentException("oversample_factor must be finite and at least 1.0");
       }
       if (searchType == SearchType.VECTOR && (vector == null || vector.isEmpty())) {
         throw new IllegalArgumentException("query_vector is required");

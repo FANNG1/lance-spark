@@ -19,9 +19,10 @@ import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.schema.LanceField;
-import org.lance.spark.search.LanceSearchQuery.SearchType;
 import org.lance.spark.utils.Utils;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.InputPartition;
@@ -33,7 +34,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -51,23 +51,16 @@ import java.util.UUID;
  * of the vector index, plus one flat-KNN task per fragment no segment covers (unless {@code
  * fast_search} asked for indexed data only).
  *
- * <p>Each unit returns its own top {@code k}; merging them into the global top {@code k} is the
- * caller's job - {@code LanceSearchTableFunctions} wraps this scan in a global sort and limit.
+ * <p>Each unit returns its local candidate count, optionally enlarged by {@code oversample_factor};
+ * merging them into the global top {@code k} is the caller's job - {@code
+ * LanceSearchTableFunctions} wraps this scan in a global sort and limit.
  */
 public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   private static final long serialVersionUID = -917364523098172364L;
   private static final Logger LOG = LoggerFactory.getLogger(LanceDistributedSearchScan.class);
-  private static final Set<String> VECTOR_INDEX_TYPES =
-      new HashSet<>(
-          Arrays.asList(
-              "VECTOR",
-              "IVF_FLAT",
-              "IVF_PQ",
-              "IVF_SQ",
-              "IVF_HNSW_FLAT",
-              "IVF_HNSW_SQ",
-              "IVF_HNSW_PQ",
-              "IVF_RQ"));
+  private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+  private static final String VECTOR_INDEX_DETAILS = "lance.index.pb.VectorIndexDetails";
+  private static final String LEGACY_VECTOR_INDEX_DETAILS = "lance.index.VectorIndexDetails";
 
   private final StructType schema;
   private final LanceSearchQuery query;
@@ -101,11 +94,21 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
 
   @Override
   public InputPartition[] planInputPartitions() {
+    int globalCandidateK = query.getK();
+    int localCandidateK = localCandidateK(globalCandidateK, query.getOversampleFactor());
     Dataset dataset =
         Utils.openDatasetBuilder(query.getReadOptions())
             .initialStorageOptions(query.getInitialStorageOptions())
             .build();
     try {
+      LanceSearchQuery pinnedQuery =
+          query.toBuilder()
+              .topK(localCandidateK)
+              .readOptions(
+                  query
+                      .getReadOptions()
+                      .withRef(Utils.pinOpenedRef(dataset, query.getReadOptions().getRef())))
+              .build();
       Set<Integer> existingFragments = new HashSet<>();
       for (Fragment fragment : dataset.getFragments()) {
         existingFragments.add(fragment.getId());
@@ -116,23 +119,45 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       }
 
       String column = resolveVectorColumn(dataset);
-      Optional<VectorIndexInfo> vectorIndex = selectVectorIndex(dataset, column);
       boolean fastSearch = Boolean.TRUE.equals(query.getFastSearch());
+      boolean bypassVectorIndex = Boolean.TRUE.equals(query.getBypassVectorIndex());
+      Optional<VectorIndexInfo> vectorIndex =
+          bypassVectorIndex
+              ? Optional.empty()
+              : selectVectorIndex(dataset, column, query.getDistanceType(), fastSearch);
+
+      LanceSearchQuery resolvedQuery = pinnedQuery.toBuilder().vectorColumn(column).build();
+      if ((resolvedQuery.getDistanceType() == null || resolvedQuery.getDistanceType().isEmpty())
+          && vectorIndex.isPresent()
+          && hasUncoveredFragments(existingFragments, vectorIndex.get())) {
+        String indexMetric =
+            vectorIndex
+                .get()
+                .getMetric()
+                .orElseThrow(
+                    () ->
+                        new IllegalArgumentException(
+                            "Cannot determine the distance metric for vector index '"
+                                + vectorIndex.get().getIndexName()
+                                + "'; pass distance_type explicitly before mixing indexed and "
+                                + "unindexed fragments"));
+        resolvedQuery = resolvedQuery.toBuilder().distanceType(indexMetric).build();
+      }
 
       List<LanceDistributedSearchInputPartition> units =
-          planUnits(
-              withResolvedVectorColumn(query, column), existingFragments, vectorIndex, fastSearch);
+          planUnits(resolvedQuery, existingFragments, vectorIndex, fastSearch);
 
       long indexedCount = units.stream().filter(u -> !u.getIndexSegments().isEmpty()).count();
       LOG.info(
           "Lance distributed vector search: column={}, indexName={}, units={} "
-              + "(indexed={}, fallback={}), candidateK={}",
+              + "(indexed={}, fallback={}), globalCandidateK={}, localCandidateK={}",
           column,
           vectorIndex.map(VectorIndexInfo::getIndexName).orElse("none"),
           units.size(),
           indexedCount,
           units.size() - indexedCount,
-          query.getK());
+          globalCandidateK,
+          localCandidateK);
 
       return units.toArray(new InputPartition[0]);
     } finally {
@@ -183,7 +208,8 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
         "VECTOR_SEARCH could not auto-detect a vector column; pass vector_column explicitly");
   }
 
-  private static Optional<VectorIndexInfo> selectVectorIndex(Dataset dataset, String column) {
+  private static Optional<VectorIndexInfo> selectVectorIndex(
+      Dataset dataset, String column, String requestedMetric, boolean fastSearch) {
     List<IndexDescription> indices;
     try {
       indices = dataset.describeIndices(new IndexCriteria.Builder().build());
@@ -197,18 +223,25 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       fieldIdToName.put(field.getId(), field.getName());
     }
 
+    String normalizedRequested = normalizeMetric(requestedMetric);
+    boolean sawIndexForColumn = false;
     for (IndexDescription idx : indices) {
       if (!isVectorIndex(idx)) {
         continue;
       }
-      List<String> fieldNames = new ArrayList<>();
-      for (Integer fieldId : idx.getFieldIds()) {
-        String name = fieldIdToName.get(fieldId);
-        if (name != null) {
-          fieldNames.add(name);
-        }
+      if (idx.getFieldIds().isEmpty()
+          || !column.equals(fieldIdToName.get(idx.getFieldIds().get(0)))) {
+        continue;
       }
-      if (!fieldNames.contains(column)) {
+      sawIndexForColumn = true;
+      Optional<String> indexMetric = resolveIndexMetric(dataset, idx);
+      if (normalizedRequested != null
+          && (!indexMetric.isPresent() || !normalizedRequested.equals(indexMetric.get()))) {
+        LOG.info(
+            "Ignoring vector index {} because query metric {} does not match index metric {}",
+            idx.getName(),
+            normalizedRequested,
+            indexMetric.orElse("unknown"));
         continue;
       }
       List<VectorIndexSegment> segments = new ArrayList<>();
@@ -217,58 +250,142 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
         Set<Integer> fragmentIds = segment.fragments().map(HashSet::new).orElseGet(HashSet::new);
         segments.add(new VectorIndexSegment(uuid, fragmentIds));
       }
-      return Optional.of(new VectorIndexInfo(idx.getName(), segments));
+      return Optional.of(new VectorIndexInfo(idx.getName(), segments, indexMetric));
+    }
+    if (fastSearch && normalizedRequested != null && sawIndexForColumn) {
+      throw new IllegalArgumentException(
+          "fast_search cannot use any vector index on column '"
+              + column
+              + "' with distance_type '"
+              + normalizedRequested
+              + "'");
     }
     return Optional.empty();
   }
 
-  private static boolean isVectorIndex(IndexDescription idx) {
-    String type = idx.getIndexType();
-    if (type == null) {
-      return false;
+  private static boolean hasUncoveredFragments(
+      Set<Integer> existingFragments, VectorIndexInfo vectorIndex) {
+    Set<Integer> uncovered = new HashSet<>(existingFragments);
+    for (VectorIndexSegment segment : vectorIndex.getSegments()) {
+      uncovered.removeAll(segment.getFragmentIds());
     }
-    return VECTOR_INDEX_TYPES.contains(type.toUpperCase(Locale.ROOT));
+    return !uncovered.isEmpty();
   }
 
-  private static LanceSearchQuery withResolvedVectorColumn(
-      LanceSearchQuery base, String resolvedColumn) {
-    if (base.getVectorColumn() != null && !base.getVectorColumn().isEmpty()) {
-      return base;
+  private static Optional<String> resolveIndexMetric(
+      Dataset dataset, IndexDescription description) {
+    String details = description.getDetailsJson();
+    if (details != null && !details.trim().isEmpty()) {
+      try {
+        JsonNode metric = JSON_MAPPER.readTree(details).get("metric_type");
+        if (metric != null && metric.isTextual()) {
+          String normalized = normalizeMetric(metric.asText());
+          if (normalized != null) {
+            return Optional.of(normalized);
+          }
+        }
+      } catch (Exception e) {
+        LOG.warn(
+            "Could not parse details for vector index {}: {}",
+            description.getName(),
+            e.getMessage());
+      }
     }
-    return LanceSearchQuery.builder(SearchType.VECTOR)
-        .tableId(base.getTableId())
-        .namespaceImpl(base.getNamespaceImpl())
-        .namespaceProperties(base.getNamespaceProperties())
-        .readOptions(base.getReadOptions())
-        .initialStorageOptions(base.getInitialStorageOptions())
-        .outputColumns(base.getOutputColumns())
-        .topK(base.getK())
-        .offset(base.getOffset())
-        .version(base.getVersion())
-        .filter(base.getFilter())
-        .withRowId(base.getWithRowId())
-        .vector(base.getVector())
-        .vectorColumn(resolvedColumn)
-        .distanceType(base.getDistanceType())
-        .nprobes(base.getNprobes())
-        .ef(base.getEf())
-        .refineFactor(base.getRefineFactor())
-        .lowerBound(base.getLowerBound())
-        .upperBound(base.getUpperBound())
-        .bypassVectorIndex(base.getBypassVectorIndex())
-        .fastSearch(base.getFastSearch())
-        .prefilter(base.getPrefilter())
-        .build();
+
+    try {
+      Set<String> metrics = indexMetricTypes(dataset.getIndexStatistics(description.getName()));
+      if (metrics.size() == 1) {
+        return Optional.of(metrics.iterator().next());
+      }
+    } catch (Exception e) {
+      LOG.warn(
+          "Could not read statistics for vector index {}: {}",
+          description.getName(),
+          e.getMessage());
+    }
+    return Optional.empty();
+  }
+
+  static Set<String> indexMetricTypes(Map<String, Object> statistics) {
+    Set<String> metrics = new HashSet<>();
+    Object indices = statistics.get("indices");
+    if (!(indices instanceof Iterable)) {
+      return metrics;
+    }
+    for (Object item : (Iterable<?>) indices) {
+      if (!(item instanceof Map)) {
+        continue;
+      }
+      Object metric = ((Map<?, ?>) item).get("metric_type");
+      String normalized = metric == null ? null : normalizeMetric(String.valueOf(metric));
+      if (normalized != null) {
+        metrics.add(normalized);
+      }
+    }
+    return metrics;
+  }
+
+  private static String normalizeMetric(String metric) {
+    if (metric == null || metric.trim().isEmpty()) {
+      return null;
+    }
+    switch (metric.toLowerCase(Locale.ROOT)) {
+      case "l2":
+      case "euclidean":
+        return "l2";
+      case "cosine":
+        return "cosine";
+      case "dot":
+      case "ip":
+      case "inner_product":
+        return "dot";
+      case "hamming":
+        return "hamming";
+      default:
+        return null;
+    }
+  }
+
+  static int localCandidateK(int globalCandidateK, Float oversampleFactor) {
+    float factor = oversampleFactor == null ? 1.0f : oversampleFactor;
+    if (!Float.isFinite(factor) || factor < 1.0f) {
+      throw new IllegalArgumentException("oversample_factor must be finite and at least 1.0");
+    }
+    double candidateK = Math.ceil(globalCandidateK * (double) factor);
+    if (candidateK > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException(
+          "oversample_factor produces more than " + Integer.MAX_VALUE + " candidates per task");
+    }
+    return (int) candidateK;
+  }
+
+  static boolean isVectorIndexTypeUrl(String typeUrl) {
+    if (typeUrl == null) {
+      return false;
+    }
+    int separator = typeUrl.lastIndexOf('/');
+    if (separator < 0 || separator == typeUrl.length() - 1) {
+      return false;
+    }
+    String detailsType = typeUrl.substring(separator + 1);
+    return VECTOR_INDEX_DETAILS.equalsIgnoreCase(detailsType)
+        || LEGACY_VECTOR_INDEX_DETAILS.equalsIgnoreCase(detailsType);
+  }
+
+  private static boolean isVectorIndex(IndexDescription idx) {
+    return isVectorIndexTypeUrl(idx.getTypeUrl());
   }
 
   /** Lightweight view of a vector index for planning. */
   private static final class VectorIndexInfo {
     private final String indexName;
     private final List<VectorIndexSegment> segments;
+    private final Optional<String> metric;
 
-    VectorIndexInfo(String indexName, List<VectorIndexSegment> segments) {
+    VectorIndexInfo(String indexName, List<VectorIndexSegment> segments, Optional<String> metric) {
       this.indexName = indexName;
       this.segments = Collections.unmodifiableList(new ArrayList<>(segments));
+      this.metric = metric;
     }
 
     String getIndexName() {
@@ -277,6 +394,10 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
 
     List<VectorIndexSegment> getSegments() {
       return segments;
+    }
+
+    Optional<String> getMetric() {
+      return metric;
     }
   }
 
