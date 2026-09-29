@@ -23,7 +23,6 @@ import org.lance.spark.utils.Utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
@@ -109,7 +108,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
         return new InputPartition[0];
       }
 
-      String column = resolveVectorColumn(dataset);
+      String column = resolveVectorColumn();
       boolean fastSearch = Boolean.TRUE.equals(query.getFastSearch());
       boolean bypassVectorIndex = Boolean.TRUE.equals(query.getBypassVectorIndex());
       Optional<VectorIndexInfo> vectorIndex =
@@ -201,18 +200,12 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
     return units;
   }
 
-  private String resolveVectorColumn(Dataset dataset) {
+  private String resolveVectorColumn() {
     String declared = query.getVectorColumn();
     if (declared != null && !declared.isEmpty()) {
       return declared;
     }
-    for (LanceField field : dataset.getLanceSchema().fields()) {
-      if (field.getType() instanceof ArrowType.FixedSizeList) {
-        return field.getName();
-      }
-    }
-    throw new IllegalArgumentException(
-        "VECTOR_SEARCH could not auto-detect a vector column; pass vector_column explicitly");
+    return "vector";
   }
 
   private static Optional<VectorIndexInfo> selectVectorIndex(
