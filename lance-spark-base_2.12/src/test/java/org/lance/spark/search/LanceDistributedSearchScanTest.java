@@ -13,12 +13,21 @@
  */
 package org.lance.spark.search;
 
+import org.lance.ipc.Query;
+import org.lance.ipc.ScanOptions;
+import org.lance.spark.search.LanceSearchQuery.SearchType;
+
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,6 +52,37 @@ class LanceDistributedSearchScanTest {
 
     assertEquals(
         Collections.singleton("cosine"), LanceDistributedSearchScan.indexMetricTypes(statistics));
+  }
+
+  @Test
+  void blankIndexMetricsAreIgnored() {
+    Map<String, Object> empty = new HashMap<>();
+    empty.put("metric_type", "");
+    Map<String, Object> whitespace = new HashMap<>();
+    whitespace.put("metric_type", "   ");
+    Map<String, Object> statistics = new HashMap<>();
+    statistics.put("indices", Arrays.asList(empty, whitespace));
+
+    assertTrue(LanceDistributedSearchScan.indexMetricTypes(statistics).isEmpty());
+  }
+
+  @Test
+  void explicitNprobesUsesFixedSemantics() {
+    LanceSearchQuery query =
+        LanceSearchQuery.builder(SearchType.VECTOR)
+            .tableId(Arrays.asList("ns", "table"))
+            .namespaceImpl("dir")
+            .vector(Collections.singletonList(0.0f))
+            .vectorColumn("vector")
+            .nprobes(7)
+            .build();
+    LanceDistributedSearchInputPartition partition =
+        LanceDistributedSearchInputPartition.forFragment(new StructType(), query, 1);
+
+    ScanOptions options = LanceDistributedSearchColumnarPartitionReader.buildScanOptions(partition);
+    Query nearest = options.getNearest().get();
+    assertEquals(7, nearest.getMinimumNprobes());
+    assertEquals(Optional.of(7), nearest.getMaximumNprobes());
   }
 
   @Test
@@ -79,5 +119,58 @@ class LanceDistributedSearchScanTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> LanceDistributedSearchScan.localCandidateK(Integer.MAX_VALUE, 2.0f));
+  }
+
+  @Test
+  void legacySegmentWithUnknownCoverageIsUsedOnlyForFastSearch() {
+    Set<Integer> liveFragments = new HashSet<>(Arrays.asList(1, 2));
+
+    assertFalse(
+        LanceDistributedSearchScan.shouldPlanIndexSegment(Optional.empty(), liveFragments, false),
+        "normal search must use complete flat fallback when legacy coverage is unknown");
+    assertTrue(
+        LanceDistributedSearchScan.shouldPlanIndexSegment(Optional.empty(), liveFragments, true),
+        "fast_search must not mistake missing legacy coverage for a stale segment");
+  }
+
+  @Test
+  void knownSegmentCoverageMustIntersectLiveFragments() {
+    Set<Integer> liveFragments = new HashSet<>(Arrays.asList(1, 2));
+
+    assertTrue(
+        LanceDistributedSearchScan.shouldPlanIndexSegment(
+            Optional.of(Collections.singleton(2)), liveFragments, false));
+    assertFalse(
+        LanceDistributedSearchScan.shouldPlanIndexSegment(
+            Optional.of(Collections.singleton(3)), liveFragments, true));
+  }
+
+  @Test
+  void staleKnownCoverageDoesNotForceItsMetricOntoFlatFallback() {
+    Set<Integer> liveFragments = new HashSet<>(Arrays.asList(1, 2));
+    Set<Integer> fallbackFragments = new HashSet<>(liveFragments);
+
+    assertFalse(
+        LanceDistributedSearchScan.shouldResolveIndexMetricForFallback(
+            Collections.singletonList(Optional.of(Collections.singleton(3))),
+            liveFragments,
+            fallbackFragments));
+    assertTrue(
+        LanceDistributedSearchScan.shouldResolveIndexMetricForFallback(
+            Collections.singletonList(Optional.empty()), liveFragments, fallbackFragments),
+        "legacy unknown coverage keeps the index metric used by namespace execution");
+  }
+
+  @Test
+  void indexDiscoveryFailureIsFatalOnlyForFastSearch() {
+    Exception cause = new IOException("metadata unavailable");
+
+    LanceDistributedSearchScan.failFastSearchWhenIndexDiscoveryFails(false, cause);
+    IllegalStateException error =
+        assertThrows(
+            IllegalStateException.class,
+            () -> LanceDistributedSearchScan.failFastSearchWhenIndexDiscoveryFails(true, cause));
+    assertEquals(cause, error.getCause());
+    assertTrue(error.getMessage().contains("index discovery failed"));
   }
 }

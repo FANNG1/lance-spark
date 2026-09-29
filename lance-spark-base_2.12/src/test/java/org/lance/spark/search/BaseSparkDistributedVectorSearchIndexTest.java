@@ -172,8 +172,10 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   void bypassVectorIndexConflictsWithFastSearch() throws Exception {
     String table = createTable("idx_bypass_fast", 1);
     String sql = vectorSearchSql(table, 5, ", bypass_vector_index => true, fast_search => true");
-    Exception error = assertThrows(Exception.class, () -> collect(sql, true));
-    assertTrue(rootMessage(error).contains("cannot both be true"), rootMessage(error));
+    for (boolean distributed : new boolean[] {true, false}) {
+      Exception error = assertThrows(Exception.class, () -> collect(sql, distributed));
+      assertTrue(rootMessage(error).contains("cannot both be true"), rootMessage(error));
+    }
   }
 
   @Test
@@ -304,17 +306,20 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
-  void oversampleFactorIncreasesEachTasksCandidateCount() throws Exception {
-    String table = createTable("idx_oversample", 2);
-    buildSegmentPerFragment(table, fragmentIds(table));
+  void oversampleFactorIncreasesOnlyIndexedTasksCandidateCount() throws Exception {
+    String table = createTable("idx_oversample", 3);
+    List<Integer> fragments = fragmentIds(table);
+    buildSegmentPerFragment(table, fragments.subList(0, fragments.size() - 1));
 
     InputPartition[] parts = planPartitions(table, 7, null, null, null, false, 1.5f);
-    assertTrue(parts.length > 1);
+    assertEquals(fragments.size(), parts.length);
     for (InputPartition part : parts) {
-      assertEquals(
-          11,
-          ((LanceDistributedSearchInputPartition) part).getQuery().getK(),
-          "ceil(7 * 1.5) candidates should be requested from every task");
+      LanceDistributedSearchInputPartition searchPart = (LanceDistributedSearchInputPartition) part;
+      if (searchPart.getIndexSegments().isEmpty()) {
+        assertEquals(7, searchPart.getQuery().getK(), "flat tasks are exact, not oversampled");
+      } else {
+        assertEquals(11, searchPart.getQuery().getK(), "ceil(7 * 1.5) candidates per indexed task");
+      }
     }
 
     String sql = vectorSearchSql(table, 7, ", oversample_factor => 1.5");
@@ -332,6 +337,20 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     assertEquals(
         java.util.Arrays.asList(0, 2, 4, 6, 8), distributed, "prefilter must yield the true top-k");
     assertEquals(reference, distributed, "prefilter results must match the reference path");
+  }
+
+  @Test
+  void explicitPrefilterFalseKeepsNamespaceSemantics() throws Exception {
+    String table = createTable("idx_postfilter", 4);
+    buildSegmentPerFragment(table, fragmentIds(table));
+
+    String sql = vectorSearchSql(table, 5, ", filter => 'id % 2 = 0', prefilter => false");
+    List<Integer> reference = ids(collect(sql, false));
+    List<Integer> withDistributedEnabled = ids(collect(sql, true));
+    assertEquals(
+        reference,
+        withDistributedEnabled,
+        "enabling distributed search must not silently replace prefilter=false with true");
   }
 
   @Test
@@ -369,6 +388,12 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   @Test
   void dotDistanceOrderingMatchesReference() {
     assertDistanceTypeOrdering("dot");
+  }
+
+  @Test
+  void dotDistanceAliasesMatchReference() {
+    assertDistanceTypeOrdering("ip");
+    assertDistanceTypeOrdering("inner_product");
   }
 
   /**

@@ -95,4 +95,39 @@ class LanceSearchQueryTest {
         IllegalArgumentException.class,
         () -> original.toBuilder().oversampleFactor(Float.NaN).build());
   }
+
+  @Test
+  void rejectsBypassVectorIndexWithFastSearch() {
+    LanceSearchQuery.Builder builder =
+        LanceSearchQuery.builder(SearchType.VECTOR)
+            .tableId(Arrays.asList("ns", "table"))
+            .namespaceImpl("dir")
+            .topK(5)
+            .vector(Arrays.asList(1.0f, 2.0f))
+            .bypassVectorIndex(true)
+            .fastSearch(true);
+    IllegalArgumentException error = assertThrows(IllegalArgumentException.class, builder::build);
+    assertEquals("bypass_vector_index and fast_search cannot both be true", error.getMessage());
+  }
+
+  @Test
+  void canonicalizesDistanceTypeAliases() {
+    assertEquals("l2", vectorQueryWithDistanceType("euclidean").getDistanceType());
+    assertEquals("dot", vectorQueryWithDistanceType("ip").getDistanceType());
+    assertEquals("dot", vectorQueryWithDistanceType("inner_product").getDistanceType());
+    assertEquals("dot", vectorQueryWithDistanceType("INNER_PRODUCT").getDistanceType());
+    assertThrows(IllegalArgumentException.class, () -> vectorQueryWithDistanceType(""));
+    assertThrows(IllegalArgumentException.class, () -> vectorQueryWithDistanceType("   "));
+    assertThrows(
+        IllegalArgumentException.class, () -> vectorQueryWithDistanceType("unsupported_metric"));
+  }
+
+  private static LanceSearchQuery vectorQueryWithDistanceType(String distanceType) {
+    return LanceSearchQuery.builder(SearchType.VECTOR)
+        .tableId(Arrays.asList("ns", "table"))
+        .namespaceImpl("dir")
+        .vector(Arrays.asList(1.0f, 2.0f))
+        .distanceType(distanceType)
+        .build();
+  }
 }

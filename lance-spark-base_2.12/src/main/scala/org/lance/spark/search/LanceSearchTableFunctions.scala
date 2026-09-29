@@ -16,11 +16,10 @@ package org.lance.spark.search
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedStar}
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, CreateArray, Descending, Expression, ExpressionInfo, Literal, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, CreateArray, Descending, Expression, Literal, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, GlobalLimit, Limit, LocalLimit, LogicalPlan, Offset, Project, Sort}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.types._
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.FullTextQuery
@@ -334,12 +333,9 @@ object LanceSearchTableFunctions {
     val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "false").toBoolean
     if (!enabled) return false
     if (query.getSearchType != SearchType.VECTOR) return false
-    if (query.getSearchType == SearchType.VECTOR &&
-      java.lang.Boolean.TRUE == query.getBypassVectorIndex &&
-      java.lang.Boolean.TRUE == query.getFastSearch) {
-      throw new IllegalArgumentException(
-        "bypass_vector_index and fast_search cannot both be true")
-    }
+    // Fragment-restricted fallback scans require prefilter=true in lance-core. Keep an explicit
+    // false on the namespace path instead of silently changing the requested filter semantics.
+    if (java.lang.Boolean.FALSE == query.getPrefilter) return false
     // lance-core's Java scanner cannot apply distance bounds yet. Keep these queries on the
     // namespace path so distributed execution never silently changes their semantics.
     if (query.getLowerBound != null || query.getUpperBound != null) return false

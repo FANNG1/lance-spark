@@ -30,7 +30,6 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * Worker-side partition reader for distributed VECTOR_SEARCH. Opens the Lance dataset locally and
@@ -131,7 +130,7 @@ public class LanceDistributedSearchColumnarPartitionReader
     }
   }
 
-  private static ScanOptions buildScanOptions(LanceDistributedSearchInputPartition p) {
+  static ScanOptions buildScanOptions(LanceDistributedSearchInputPartition p) {
     LanceSearchQuery base = p.getQuery();
     String column = base.getVectorColumn();
     if (column == null || column.isEmpty()) {
@@ -148,7 +147,7 @@ public class LanceDistributedSearchColumnarPartitionReader
       q.setDistanceType(parseDistanceType(base.getDistanceType()));
     }
     if (base.getNprobes() != null) {
-      q.setMinimumNprobes(base.getNprobes());
+      q.setNprobes(base.getNprobes());
     }
     if (base.getEf() != null) {
       q.setEf(base.getEf());
@@ -201,9 +200,8 @@ public class LanceDistributedSearchColumnarPartitionReader
   }
 
   private static DistanceType parseDistanceType(String name) {
-    switch (name.toLowerCase(Locale.ROOT)) {
+    switch (LanceSearchQuery.canonicalizeDistanceType(name)) {
       case "l2":
-      case "euclidean":
         return DistanceType.L2;
       case "cosine":
         return DistanceType.Cosine;

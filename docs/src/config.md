@@ -87,9 +87,10 @@ namespace client and refresh credentials when opening the dataset.
 
 The planner creates one task for every selected vector-index segment and one flat-search task for
 each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
-`fast_search=true` searches only indexed fragments; these two options cannot both be true.
+`fast_search=true` searches only indexed fragments.
 Queries with `lower_bound` or `upper_bound` continue to use namespace execution until Lance's Java
-scanner supports these bounds.
+scanner supports these bounds. Queries that explicitly set `prefilter=false` also stay on namespace
+execution because fragment-restricted fallback scans require prefiltering.
 
 ## Cache Backends
 

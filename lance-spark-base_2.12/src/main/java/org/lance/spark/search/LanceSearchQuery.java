@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public class LanceSearchQuery implements Serializable {
@@ -97,6 +98,28 @@ public class LanceSearchQuery implements Serializable {
 
   public static Builder builder(SearchType searchType) {
     return new Builder(searchType);
+  }
+
+  static String canonicalizeDistanceType(String distanceType) {
+    if (distanceType == null) {
+      return null;
+    }
+    String normalized = distanceType.trim().toLowerCase(Locale.ROOT);
+    switch (normalized) {
+      case "l2":
+      case "euclidean":
+        return "l2";
+      case "cosine":
+        return "cosine";
+      case "dot":
+      case "ip":
+      case "inner_product":
+        return "dot";
+      case "hamming":
+        return "hamming";
+      default:
+        throw new IllegalArgumentException("Unsupported distance_type: " + distanceType);
+    }
   }
 
   /** Returns a builder initialized with every field of this query. */
@@ -432,7 +455,7 @@ public class LanceSearchQuery implements Serializable {
     }
 
     public Builder distanceType(String distanceType) {
-      this.distanceType = distanceType;
+      this.distanceType = canonicalizeDistanceType(distanceType);
       return this;
     }
 
@@ -516,6 +539,10 @@ public class LanceSearchQuery implements Serializable {
       if (oversampleFactor != null
           && (!Float.isFinite(oversampleFactor) || oversampleFactor < 1.0f)) {
         throw new IllegalArgumentException("oversample_factor must be finite and at least 1.0");
+      }
+      if (Boolean.TRUE.equals(bypassVectorIndex) && Boolean.TRUE.equals(fastSearch)) {
+        throw new IllegalArgumentException(
+            "bypass_vector_index and fast_search cannot both be true");
       }
       if (searchType == SearchType.VECTOR && (vector == null || vector.isEmpty())) {
         throw new IllegalArgumentException("query_vector is required");
