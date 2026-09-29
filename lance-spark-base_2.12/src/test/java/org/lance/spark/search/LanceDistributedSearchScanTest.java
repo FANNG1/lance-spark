@@ -27,7 +27,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -122,43 +121,18 @@ class LanceDistributedSearchScanTest {
   }
 
   @Test
-  void legacySegmentWithUnknownCoverageIsUsedOnlyForFastSearch() {
-    Set<Integer> liveFragments = new HashSet<>(Arrays.asList(1, 2));
+  void segmentWithoutFragmentBitmapIsRejected() {
+    assertEquals(
+        new HashSet<>(Arrays.asList(1, 2)),
+        LanceDistributedSearchScan.requireFragmentCoverage(
+            "vec_idx", Optional.of(Arrays.asList(1, 2))));
 
-    assertFalse(
-        LanceDistributedSearchScan.shouldPlanIndexSegment(Optional.empty(), liveFragments, false),
-        "normal search must use complete flat fallback when legacy coverage is unknown");
-    assertTrue(
-        LanceDistributedSearchScan.shouldPlanIndexSegment(Optional.empty(), liveFragments, true),
-        "fast_search must not mistake missing legacy coverage for a stale segment");
-  }
-
-  @Test
-  void knownSegmentCoverageMustIntersectLiveFragments() {
-    Set<Integer> liveFragments = new HashSet<>(Arrays.asList(1, 2));
-
-    assertTrue(
-        LanceDistributedSearchScan.shouldPlanIndexSegment(
-            Optional.of(Collections.singleton(2)), liveFragments, false));
-    assertFalse(
-        LanceDistributedSearchScan.shouldPlanIndexSegment(
-            Optional.of(Collections.singleton(3)), liveFragments, true));
-  }
-
-  @Test
-  void staleKnownCoverageDoesNotForceItsMetricOntoFlatFallback() {
-    Set<Integer> liveFragments = new HashSet<>(Arrays.asList(1, 2));
-    Set<Integer> fallbackFragments = new HashSet<>(liveFragments);
-
-    assertFalse(
-        LanceDistributedSearchScan.shouldResolveIndexMetricForFallback(
-            Collections.singletonList(Optional.of(Collections.singleton(3))),
-            liveFragments,
-            fallbackFragments));
-    assertTrue(
-        LanceDistributedSearchScan.shouldResolveIndexMetricForFallback(
-            Collections.singletonList(Optional.empty()), liveFragments, fallbackFragments),
-        "legacy unknown coverage keeps the index metric used by namespace execution");
+    IllegalStateException error =
+        assertThrows(
+            IllegalStateException.class,
+            () -> LanceDistributedSearchScan.requireFragmentCoverage("vec_idx", Optional.empty()));
+    assertTrue(error.getMessage().contains("without a fragment bitmap"), error.getMessage());
+    assertTrue(error.getMessage().contains("vec_idx"), error.getMessage());
   }
 
   @Test

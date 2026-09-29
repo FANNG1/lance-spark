@@ -117,13 +117,16 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
               ? Optional.empty()
               : selectVectorIndex(dataset, column, query.getDistanceType(), fastSearch);
 
-      // Fragments no index segment covers; fast_search leaves them out entirely.
+      // Fragments no index segment covers; fast_search leaves them out entirely. A segment whose
+      // fragments are all gone (compaction, deletion) is stale and gets no unit of its own.
       Set<Integer> fallbackFragments = new TreeSet<>(existingFragments);
-      List<Optional<Set<Integer>>> indexSegmentCoverages = new ArrayList<>();
+      List<UUID> liveSegments = new ArrayList<>();
       if (vectorIndex.isPresent()) {
         for (VectorIndexSegment segment : vectorIndex.get().getSegments()) {
-          indexSegmentCoverages.add(segment.getFragmentIds());
-          segment.getFragmentIds().ifPresent(fallbackFragments::removeAll);
+          fallbackFragments.removeAll(segment.getFragmentIds());
+          if (!Collections.disjoint(segment.getFragmentIds(), existingFragments)) {
+            liveSegments.add(segment.getUuid());
+          }
         }
       }
       if (fastSearch) {
@@ -141,8 +144,8 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       // Indexed tasks search with the index's metric when none is given, while flat tasks would
       // default to L2; the global merge needs both on the same metric.
       if ((resolvedQuery.getDistanceType() == null || resolvedQuery.getDistanceType().isEmpty())
-          && shouldResolveIndexMetricForFallback(
-              indexSegmentCoverages, existingFragments, fallbackFragments)) {
+          && !liveSegments.isEmpty()
+          && !fallbackFragments.isEmpty()) {
         String indexMetric =
             vectorIndex
                 .get()
@@ -161,13 +164,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       LanceSearchQuery indexedQuery = resolvedQuery.toBuilder().topK(localCandidateK).build();
 
       List<LanceDistributedSearchInputPartition> units =
-          planUnits(
-              indexedQuery,
-              resolvedQuery,
-              existingFragments,
-              vectorIndex,
-              fallbackFragments,
-              fastSearch);
+          planUnits(indexedQuery, resolvedQuery, liveSegments, fallbackFragments);
 
       long indexedCount = units.stream().filter(u -> !u.getIndexSegments().isEmpty()).count();
       LOG.info(
@@ -190,20 +187,12 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   private List<LanceDistributedSearchInputPartition> planUnits(
       LanceSearchQuery indexedQuery,
       LanceSearchQuery fallbackQuery,
-      Set<Integer> existingFragments,
-      Optional<VectorIndexInfo> vectorIndex,
-      Set<Integer> fallbackFragments,
-      boolean fastSearch) {
+      List<UUID> liveSegments,
+      Set<Integer> fallbackFragments) {
     List<LanceDistributedSearchInputPartition> units = new ArrayList<>();
-    if (vectorIndex.isPresent()) {
-      for (VectorIndexSegment segment : vectorIndex.get().getSegments()) {
-        if (!shouldPlanIndexSegment(segment.getFragmentIds(), existingFragments, fastSearch)) {
-          continue;
-        }
-        units.add(
-            LanceDistributedSearchInputPartition.forIndexSegment(
-                schema, indexedQuery, segment.getUuid()));
-      }
+    for (UUID segmentUuid : liveSegments) {
+      units.add(
+          LanceDistributedSearchInputPartition.forIndexSegment(schema, indexedQuery, segmentUuid));
     }
     for (Integer fragmentId : fallbackFragments) {
       units.add(
@@ -254,20 +243,25 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       }
       sawIndexForColumn = true;
       Optional<String> indexMetric = resolveIndexMetric(dataset, idx);
+      // Only a metric we actually resolved can contradict the query. When it cannot be read from
+      // the index metadata, lance-core decides: a worker hands the segment to `indexSegments(...)`,
+      // which opens the index and rejects a genuine mismatch itself (see the with_index_segments
+      // branch of rust/lance/src/dataset/scanner.rs).
       if (normalizedRequested != null
-          && (!indexMetric.isPresent() || !normalizedRequested.equals(indexMetric.get()))) {
-        LOG.info(
+          && indexMetric.isPresent()
+          && !normalizedRequested.equals(indexMetric.get())) {
+        LOG.warn(
             "Ignoring vector index {} because query metric {} does not match index metric {}",
             idx.getName(),
             normalizedRequested,
-            indexMetric.orElse("unknown"));
+            indexMetric.get());
         continue;
       }
       List<VectorIndexSegment> segments = new ArrayList<>();
       for (Index segment : idx.getSegments()) {
-        UUID uuid = segment.uuid();
-        Optional<Set<Integer>> fragmentIds = segment.fragments().map(HashSet::new);
-        segments.add(new VectorIndexSegment(uuid, fragmentIds));
+        segments.add(
+            new VectorIndexSegment(
+                segment.uuid(), requireFragmentCoverage(idx.getName(), segment.fragments())));
       }
       return Optional.of(new VectorIndexInfo(idx.getName(), segments, indexMetric));
     }
@@ -356,34 +350,24 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
     return (int) candidateK;
   }
 
-  static boolean shouldPlanIndexSegment(
-      Optional<Set<Integer>> fragmentIds, Set<Integer> existingFragments, boolean fastSearch) {
-    if (!fragmentIds.isPresent()) {
-      // Legacy index segments did not persist their fragment bitmap.  A normal search falls back
-      // to all live fragments because it cannot safely determine which fragments are unindexed.
-      // fast_search explicitly excludes fallback work, so it must still search the legacy segment
-      // instead of mistaking unknown coverage for an empty/stale segment.
-      return fastSearch;
-    }
-    return !Collections.disjoint(fragmentIds.get(), existingFragments);
-  }
-
-  static boolean shouldResolveIndexMetricForFallback(
-      List<Optional<Set<Integer>>> segmentCoverages,
-      Set<Integer> existingFragments,
-      Set<Integer> fallbackFragments) {
-    if (fallbackFragments.isEmpty()) {
-      return false;
-    }
-    // A known live segment will be searched alongside the fallback fragments. Missing coverage is
-    // a legacy index: normal mode uses complete flat fallback, but preserving the index metric
-    // keeps the implicit distance_type consistent with namespace execution.
-    for (Optional<Set<Integer>> coverage : segmentCoverages) {
-      if (shouldPlanIndexSegment(coverage, existingFragments, true)) {
-        return true;
-      }
-    }
-    return false;
+  /**
+   * Splitting a search into indexed and flat units needs to know which fragments each index segment
+   * covers. Indices written before Lance 0.8 did not persist that bitmap, and lance-core refuses
+   * the same plan for the same reason - {@code Dataset::unindexed_fragments} in
+   * rust/lance/src/index.rs returns "Please upgrade lance to 0.8+ to use this function" - so
+   * namespace execution fails on these datasets too.
+   */
+  static Set<Integer> requireFragmentCoverage(
+      String indexName, Optional<List<Integer>> fragmentIds) {
+    return fragmentIds
+        .map(ids -> (Set<Integer>) new HashSet<>(ids))
+        .orElseThrow(
+            () ->
+                new IllegalStateException(
+                    "Vector index '"
+                        + indexName
+                        + "' has a segment without a fragment bitmap; please upgrade the dataset "
+                        + "to Lance 0.8+ to search it"));
   }
 
   static void failFastSearchWhenIndexDiscoveryFails(boolean fastSearch, Exception cause) {
@@ -438,18 +422,18 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   /** One physical segment of a vector index. */
   private static final class VectorIndexSegment {
     private final UUID uuid;
-    private final Optional<Set<Integer>> fragmentIds;
+    private final Set<Integer> fragmentIds;
 
-    VectorIndexSegment(UUID uuid, Optional<Set<Integer>> fragmentIds) {
+    VectorIndexSegment(UUID uuid, Set<Integer> fragmentIds) {
       this.uuid = uuid;
-      this.fragmentIds = fragmentIds.map(ids -> Collections.unmodifiableSet(new HashSet<>(ids)));
+      this.fragmentIds = Collections.unmodifiableSet(new HashSet<>(fragmentIds));
     }
 
     UUID getUuid() {
       return uuid;
     }
 
-    Optional<Set<Integer>> getFragmentIds() {
+    Set<Integer> getFragmentIds() {
       return fragmentIds;
     }
   }
