@@ -340,17 +340,18 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
-  void explicitPrefilterFalseKeepsNamespaceSemantics() throws Exception {
+  void explicitPrefilterFalseIsRejectedByDistributedSearch() throws Exception {
     String table = createTable("idx_postfilter", 4);
     buildSegmentPerFragment(table, fragmentIds(table));
 
     String sql = vectorSearchSql(table, 5, ", filter => 'id % 2 = 0', prefilter => false");
     List<Integer> reference = ids(collect(sql, false));
-    List<Integer> withDistributedEnabled = ids(collect(sql, true));
-    assertEquals(
-        reference,
-        withDistributedEnabled,
-        "enabling distributed search must not silently replace prefilter=false with true");
+    assertFalse(reference.isEmpty(), "prefilter=false remains supported by namespace execution");
+
+    Exception error = assertThrows(Exception.class, () -> collect(sql, true));
+    assertTrue(
+        rootMessage(error).contains("Distributed VECTOR_SEARCH does not support prefilter=false"),
+        rootMessage(error));
   }
 
   @Test

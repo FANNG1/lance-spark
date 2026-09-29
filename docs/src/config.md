@@ -88,9 +88,10 @@ namespace client and refresh credentials when opening the dataset.
 The planner creates one task for every selected vector-index segment and one flat-search task for
 each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
 `fast_search=true` searches only indexed fragments.
-Queries with `lower_bound` or `upper_bound` continue to use namespace execution until Lance's Java
-scanner supports these bounds. Queries that explicitly set `prefilter=false` also stay on namespace
-execution because fragment-restricted fallback scans require prefiltering.
+Distributed search does not support `lower_bound`, `upper_bound`, or an explicit
+`prefilter=false`. These combinations fail during planning instead of silently switching back to
+namespace execution. Disable `spark.sql.lance.search.distributed.enabled` to run them through the
+namespace.
 
 ## Cache Backends
 

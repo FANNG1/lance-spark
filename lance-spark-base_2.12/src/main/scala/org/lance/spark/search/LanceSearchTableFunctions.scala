@@ -333,12 +333,21 @@ object LanceSearchTableFunctions {
     val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "false").toBoolean
     if (!enabled) return false
     if (query.getSearchType != SearchType.VECTOR) return false
-    // Fragment-restricted fallback scans require prefilter=true in lance-core. Keep an explicit
-    // false on the namespace path instead of silently changing the requested filter semantics.
-    if (java.lang.Boolean.FALSE == query.getPrefilter) return false
-    // lance-core's Java scanner cannot apply distance bounds yet. Keep these queries on the
-    // namespace path so distributed execution never silently changes their semantics.
-    if (query.getLowerBound != null || query.getUpperBound != null) return false
+    // Fragment-restricted fallback scans require prefilter=true in lance-core. Reject an explicit
+    // false instead of silently changing either the filter semantics or the requested execution
+    // path.
+    if (java.lang.Boolean.FALSE == query.getPrefilter) {
+      throw new IllegalArgumentException(
+        "Distributed VECTOR_SEARCH does not support prefilter=false; disable " +
+          "spark.sql.lance.search.distributed.enabled to use namespace execution")
+    }
+    // lance-core's Java scanner cannot apply distance bounds yet. Fail during planning instead of
+    // silently sending a distributed query back through the namespace.
+    if (query.getLowerBound != null || query.getUpperBound != null) {
+      throw new IllegalArgumentException(
+        "Distributed VECTOR_SEARCH does not support lower_bound or upper_bound; disable " +
+          "spark.sql.lance.search.distributed.enabled to use namespace execution")
+    }
     true
   }
 

@@ -29,6 +29,8 @@ import java.util.Comparator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for distributed VECTOR_SEARCH (the path through {@link
@@ -175,23 +177,37 @@ public abstract class BaseSparkDistributedVectorSearchTest {
   }
 
   @Test
-  void distanceBoundsStayOnNamespacePath() {
+  void distanceBoundsAreRejectedByDistributedSearch() {
     Assumptions.assumeFalse(
         spark.version().startsWith("3.4."),
         "Spark 3.4 table-valued functions do not support named arguments");
     String fullName = createFiveFragmentTable();
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
-    List<Row> rows =
-        spark
-            .sql(
-                "SELECT id, _distance FROM VECTOR_SEARCH(table => '"
-                    + fullName
-                    + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 5, "
-                    + "lower_bound => 0.5, upper_bound => 5.0)")
-            .collectAsList();
+    String sql =
+        "SELECT id, _distance FROM VECTOR_SEARCH(table => '"
+            + fullName
+            + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 5, "
+            + "lower_bound => 0.5, upper_bound => 5.0)";
+
+    spark.conf().set("spark.sql.lance.search.distributed.enabled", "false");
+    List<Row> rows = spark.sql(sql).collectAsList();
     assertEquals(1, rows.size());
     assertEquals(1, rows.get(0).getInt(0));
     assertEquals(4.0f, rows.get(0).getFloat(1), 1e-4f);
+
+    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    Exception error = assertThrows(Exception.class, () -> spark.sql(sql).collectAsList());
+    assertTrue(
+        rootMessage(error)
+            .contains("Distributed VECTOR_SEARCH does not support lower_bound or upper_bound"),
+        rootMessage(error));
+  }
+
+  private static String rootMessage(Throwable throwable) {
+    Throwable root = throwable;
+    while (root.getCause() != null) {
+      root = root.getCause();
+    }
+    return String.valueOf(root.getMessage());
   }
 
   /**

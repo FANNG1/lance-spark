@@ -70,6 +70,9 @@ By default, Spark plans `VECTOR_SEARCH` with one input partition and calls the L
 `queryTable` API. When `spark.sql.lance.search.distributed.enabled=true`, Spark instead opens the
 dataset from its executors, searches vector-index segments and uncovered fragments in parallel,
 and globally merges their candidates. `oversample_factor` applies only to this distributed path.
+Distributed execution does not support `lower_bound`, `upper_bound`, or an explicit
+`prefilter=false`; these combinations fail during planning. Disable distributed execution to run
+them through the namespace.
 
 ## Validation
 
