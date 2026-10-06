@@ -42,8 +42,7 @@ public final class ExecutorNamespace implements AutoCloseable {
   }
 
   /**
-   * Same as {@link #acquire(LanceInputPartition)} but for callers that do not carry a {@link
-   * LanceInputPartition}, such as the distributed search partition reader.
+   * Same as {@link #acquire(LanceInputPartition)} for a task that is not a fragment scan partition.
    */
   public static ExecutorNamespace acquire(
       LanceSparkReadOptions readOptions,

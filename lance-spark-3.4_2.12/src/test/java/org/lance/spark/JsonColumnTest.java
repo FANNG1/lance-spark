@@ -11,20 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.lance.spark.utils;
+package org.lance.spark;
 
-public class LargeVarCharUtils {
-
-  public static final String ARROW_LARGE_VAR_CHAR_KEY = "arrow:large-var-char";
-  public static final String ARROW_LARGE_VAR_CHAR_VALUE = "true";
-
-  /**
-   * Create the property key for configuring large varchar on a column.
-   *
-   * @param fieldName the name of the field
-   * @return the property key (e.g., "my_column.arrow.large_var_char")
-   */
-  public static String createPropertyKey(String fieldName) {
-    return fieldName + ".arrow.large_var_char";
-  }
-}
+public class JsonColumnTest extends BaseJsonColumnTest {}
