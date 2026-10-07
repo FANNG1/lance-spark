@@ -49,9 +49,10 @@ import java.util.UUID;
  * of the vector index, plus one flat-KNN task per fragment no segment covers (unless {@code
  * fast_search} asked for indexed data only).
  *
- * <p>Each unit returns its local top {@code k}, which {@code oversample_factor} enlarges for
- * indexed units; merging them into the global top {@code k} is the caller's job - {@code
- * LanceSearchTableFunctions} wraps this scan in a global sort and limit.
+ * <p>Each unit returns its own local top {@code k}; merging them into the global top {@code k} is
+ * the caller's job - {@code LanceSearchTableFunctions} wraps this scan in a global sort and limit.
+ * The merge sorts by the distance each unit reported, so a unit never needs to return more than
+ * {@code k} rows: a row outside its local top {@code k} cannot enter the global top {@code k}.
  */
 public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   private static final long serialVersionUID = -917364523098172364L;
@@ -60,8 +61,23 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   private static final String VECTOR_INDEX_DETAILS = "lance.index.pb.VectorIndexDetails";
   private static final String LEGACY_VECTOR_INDEX_DETAILS = "lance.index.VectorIndexDetails";
 
+  /**
+   * Column searched when {@code vector_column} is omitted. Must stay the field namespace execution
+   * defaults to, as documented in docs/src/operations/dql/vector-search.md: picking the first
+   * fixed-size-list field instead silently returns different neighbors on a table with more than
+   * one vector column.
+   */
+  private static final String DEFAULT_VECTOR_COLUMN = "vector";
+
   private final StructType schema;
   private final LanceSearchQuery query;
+
+  /**
+   * Planned once per scan. Spark builds a fresh {@code BatchScanExec} for every materialization of
+   * the same logical plan, so replanning would pin a new dataset version each time: two actions on
+   * one DataFrame could then read different versions. Driver-only, hence transient.
+   */
+  private transient InputPartition[] plannedPartitions;
 
   public LanceDistributedSearchScan(StructType schema, LanceSearchQuery query) {
     Objects.requireNonNull(
@@ -91,9 +107,14 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   }
 
   @Override
-  public InputPartition[] planInputPartitions() {
-    int globalCandidateK = query.getK();
-    int localCandidateK = localCandidateK(globalCandidateK, query.getOversampleFactor());
+  public synchronized InputPartition[] planInputPartitions() {
+    if (plannedPartitions == null) {
+      plannedPartitions = planPartitionsOnce();
+    }
+    return plannedPartitions.clone();
+  }
+
+  private InputPartition[] planPartitionsOnce() {
     Dataset dataset =
         Utils.openDatasetBuilder(query.getReadOptions())
             .initialStorageOptions(query.getInitialStorageOptions())
@@ -158,24 +179,19 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
                                 + "unindexed fragments"));
         resolvedQuery = resolvedQuery.toBuilder().distanceType(indexMetric).build();
       }
-      // Oversampling only helps approximate index searches: a flat task already returns its
-      // exact local top k.
-      LanceSearchQuery indexedQuery = resolvedQuery.toBuilder().topK(localCandidateK).build();
-
       List<LanceDistributedSearchInputPartition> units =
-          planUnits(indexedQuery, resolvedQuery, liveSegments, fallbackFragments);
+          planUnits(resolvedQuery, liveSegments, fallbackFragments);
 
       long indexedCount = units.stream().filter(u -> !u.getIndexSegments().isEmpty()).count();
       LOG.info(
           "Lance distributed vector search: column={}, indexName={}, units={} "
-              + "(indexed={}, fallback={}), globalCandidateK={}, indexedCandidateK={}",
+              + "(indexed={}, fallback={}), candidateK={}",
           column,
           vectorIndex.map(VectorIndexInfo::getIndexName).orElse("none"),
           units.size(),
           indexedCount,
           units.size() - indexedCount,
-          globalCandidateK,
-          localCandidateK);
+          resolvedQuery.getK());
 
       return units.toArray(new InputPartition[0]);
     } finally {
@@ -184,18 +200,13 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   }
 
   private List<LanceDistributedSearchInputPartition> planUnits(
-      LanceSearchQuery indexedQuery,
-      LanceSearchQuery fallbackQuery,
-      List<UUID> liveSegments,
-      Set<Integer> fallbackFragments) {
+      LanceSearchQuery query, List<UUID> liveSegments, Set<Integer> fallbackFragments) {
     List<LanceDistributedSearchInputPartition> units = new ArrayList<>();
     for (UUID segmentUuid : liveSegments) {
-      units.add(
-          LanceDistributedSearchInputPartition.forIndexSegment(schema, indexedQuery, segmentUuid));
+      units.add(LanceDistributedSearchInputPartition.forIndexSegment(schema, query, segmentUuid));
     }
     for (Integer fragmentId : fallbackFragments) {
-      units.add(
-          LanceDistributedSearchInputPartition.forFragment(schema, fallbackQuery, fragmentId));
+      units.add(LanceDistributedSearchInputPartition.forFragment(schema, query, fragmentId));
     }
     return units;
   }
@@ -205,7 +216,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
     if (declared != null && !declared.isEmpty()) {
       return declared;
     }
-    return "vector";
+    return DEFAULT_VECTOR_COLUMN;
   }
 
   private static Optional<VectorIndexInfo> selectVectorIndex(
@@ -328,19 +339,6 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
     } catch (IllegalArgumentException e) {
       return null;
     }
-  }
-
-  static int localCandidateK(int globalCandidateK, Float oversampleFactor) {
-    float factor = oversampleFactor == null ? 1.0f : oversampleFactor;
-    if (!Float.isFinite(factor) || factor < 1.0f) {
-      throw new IllegalArgumentException("oversample_factor must be finite and at least 1.0");
-    }
-    double candidateK = Math.ceil(globalCandidateK * (double) factor);
-    if (candidateK > Integer.MAX_VALUE) {
-      throw new IllegalArgumentException(
-          "oversample_factor produces more than " + Integer.MAX_VALUE + " candidates per task");
-    }
-    return (int) candidateK;
   }
 
   /**

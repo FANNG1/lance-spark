@@ -53,7 +53,6 @@ class LanceSearchQueryTest {
             .bypassVectorIndex(false)
             .fastSearch(true)
             .prefilter(true)
-            .oversampleFactor(1.5f)
             .textQuery("hello")
             .searchColumns(Arrays.asList("title", "body"))
             .fullTextQueryJson("{\"match\":{\"column\":\"body\",\"terms\":\"hello\"}}")
@@ -61,7 +60,9 @@ class LanceSearchQueryTest {
 
     LanceSearchQuery copy = original.toBuilder().build();
 
-    assertEquals(original.getSearchType(), copy.getSearchType());
+    // The search type has no accessor, so assert it round-tripped through behavior: only a
+    // VECTOR query rejects a missing query_vector.
+    assertThrows(IllegalArgumentException.class, () -> original.toBuilder().vector(null).build());
     assertEquals(original.getTableId(), copy.getTableId());
     assertEquals(original.getNamespaceImpl(), copy.getNamespaceImpl());
     assertEquals(original.getNamespaceProperties(), copy.getNamespaceProperties());
@@ -84,16 +85,9 @@ class LanceSearchQueryTest {
     assertEquals(original.getBypassVectorIndex(), copy.getBypassVectorIndex());
     assertEquals(original.getFastSearch(), copy.getFastSearch());
     assertEquals(original.getPrefilter(), copy.getPrefilter());
-    assertEquals(original.getOversampleFactor(), copy.getOversampleFactor());
     assertEquals(original.getTextQuery(), copy.getTextQuery());
     assertEquals(original.getSearchColumns(), copy.getSearchColumns());
     assertEquals(original.getFullTextQueryJson(), copy.getFullTextQueryJson());
-
-    assertThrows(
-        IllegalArgumentException.class, () -> original.toBuilder().oversampleFactor(0.5f).build());
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> original.toBuilder().oversampleFactor(Float.NaN).build());
   }
 
   @Test

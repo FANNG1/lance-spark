@@ -55,8 +55,8 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `filter` | String | No | SQL filter expression evaluated by Lance. |
 | `offset` | Integer | No | Number of results to skip. Lance Spark requests `num_results + offset` rows from Lance before applying the offset. |
 | `version` | Long | No | Lance table version to search. |
-| `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters. |
-| `oversample_factor` | Float | No | Distributed search asks each vector-index task for `ceil((num_results + offset) * oversample_factor)` candidates. Defaults to `1.0`; larger values can improve global recall at the cost of more executor work and shuffle traffic. Flat-search tasks are exact and are not oversampled. |
+| `nprobes`, `ef` | Integer | No | Vector index search tuning parameters. Raise `nprobes` to probe more IVF partitions, which is what recovers recall lost to an approximate search. |
+| `refine_factor` | Integer | No | Over-fetch `num_results * refine_factor` candidates from the index, then re-score them against the original vectors and keep the best `num_results`. Improves accuracy for quantized indexes such as IVF_PQ, at the cost of reading the vectors back. |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
 | `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. `bypass_vector_index` and `fast_search` cannot both be true. |
 
@@ -69,7 +69,10 @@ The result includes the requested table columns and a nullable `_distance` float
 By default, Spark plans `VECTOR_SEARCH` with one input partition and calls the Lance namespace
 `queryTable` API. When `spark.sql.lance.search.distributed.enabled=true`, Spark instead opens the
 dataset from its executors, searches vector-index segments and uncovered fragments in parallel,
-and globally merges their candidates. `oversample_factor` applies only to this distributed path.
+and globally merges their candidates. The merge sorts by the distance each task reported, so each
+task returns only its own top `num_results + offset` rows: a row outside a task's local top k
+cannot enter the global top k. `nprobes` and `refine_factor` apply per task and behave as they do
+on the namespace path.
 Distributed execution does not support `lower_bound`, `upper_bound`, or an explicit
 `prefilter=false`; these combinations fail during planning. Disable distributed execution to run
 them through the namespace.

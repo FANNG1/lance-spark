@@ -306,24 +306,25 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
-  void oversampleFactorIncreasesOnlyIndexedTasksCandidateCount() throws Exception {
-    String table = createTable("idx_oversample", 3);
+  void everyUnitRequestsTheSameCandidateCount() throws Exception {
+    // The merge sorts by the distance each unit reported, so the global top k is always contained
+    // in the union of the per-unit top k: no unit needs to over-fetch, indexed or flat.
+    String table = createTable("idx_candidate_k", 3);
     List<Integer> fragments = fragmentIds(table);
     buildSegmentPerFragment(table, fragments.subList(0, fragments.size() - 1));
 
-    InputPartition[] parts = planPartitions(table, 7, null, null, null, false, 1.5f);
-    assertEquals(fragments.size(), parts.length);
+    InputPartition[] parts = planPartitions(table, 7, null, null, null, false);
+    assertEquals(fragments.size(), parts.length, "two indexed units plus one flat unit");
     for (InputPartition part : parts) {
-      LanceDistributedSearchInputPartition searchPart = (LanceDistributedSearchInputPartition) part;
-      if (searchPart.getIndexSegments().isEmpty()) {
-        assertEquals(7, searchPart.getQuery().getK(), "flat tasks are exact, not oversampled");
-      } else {
-        assertEquals(11, searchPart.getQuery().getK(), "ceil(7 * 1.5) candidates per indexed task");
-      }
+      assertEquals(
+          7,
+          ((LanceDistributedSearchInputPartition) part).getQuery().getK(),
+          "every unit asks for exactly the requested candidate count");
     }
 
-    String sql = vectorSearchSql(table, 7, ", oversample_factor => 1.5");
-    assertEquals(ids(collect(sql, false)), ids(collect(sql, true)));
+    assertEquals(
+        ids(collect(vectorSearchSql(table, 7, ""), false)),
+        ids(collect(vectorSearchSql(table, 7, ""), true)));
   }
 
   @Test
@@ -621,18 +622,6 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
       String distanceType,
       boolean bypassVectorIndex)
       throws Exception {
-    return planPartitions(table, k, fastSearch, filter, distanceType, bypassVectorIndex, null);
-  }
-
-  private InputPartition[] planPartitions(
-      String table,
-      int k,
-      Boolean fastSearch,
-      String filter,
-      String distanceType,
-      boolean bypassVectorIndex,
-      Float oversampleFactor)
-      throws Exception {
     LanceDataset lanceTable = lanceTable(table);
     List<Float> queryVector = new ArrayList<>();
     for (int i = 0; i < DIM; i++) {
@@ -654,7 +643,6 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .filter(filter)
             .fastSearch(fastSearch)
             .bypassVectorIndex(bypassVectorIndex)
-            .oversampleFactor(oversampleFactor)
             .build();
     return new LanceDistributedSearchScan(lanceTable.schema(), query).planInputPartitions();
   }

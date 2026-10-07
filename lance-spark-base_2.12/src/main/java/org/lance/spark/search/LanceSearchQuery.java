@@ -61,7 +61,6 @@ public class LanceSearchQuery implements Serializable {
   private final Boolean bypassVectorIndex;
   private final Boolean fastSearch;
   private final Boolean prefilter;
-  private final Float oversampleFactor;
   private final String textQuery;
   private final List<String> searchColumns;
   private final String fullTextQueryJson;
@@ -90,7 +89,6 @@ public class LanceSearchQuery implements Serializable {
     this.bypassVectorIndex = builder.bypassVectorIndex;
     this.fastSearch = builder.fastSearch;
     this.prefilter = builder.prefilter;
-    this.oversampleFactor = builder.oversampleFactor;
     this.textQuery = builder.textQuery;
     this.searchColumns = immutableList(builder.searchColumns);
     this.fullTextQueryJson = builder.fullTextQueryJson;
@@ -125,10 +123,6 @@ public class LanceSearchQuery implements Serializable {
   /** Returns a builder initialized with every field of this query. */
   public Builder toBuilder() {
     return new Builder(this);
-  }
-
-  public SearchType getSearchType() {
-    return searchType;
   }
 
   public List<String> getTableId() {
@@ -223,10 +217,6 @@ public class LanceSearchQuery implements Serializable {
 
   public Boolean getPrefilter() {
     return prefilter;
-  }
-
-  public Float getOversampleFactor() {
-    return oversampleFactor;
   }
 
   public String getTextQuery() {
@@ -349,7 +339,6 @@ public class LanceSearchQuery implements Serializable {
     private Boolean bypassVectorIndex;
     private Boolean fastSearch;
     private Boolean prefilter;
-    private Float oversampleFactor;
     private String textQuery;
     private List<String> searchColumns = Collections.emptyList();
     private String fullTextQueryJson;
@@ -382,7 +371,6 @@ public class LanceSearchQuery implements Serializable {
       this.bypassVectorIndex = query.bypassVectorIndex;
       this.fastSearch = query.fastSearch;
       this.prefilter = query.prefilter;
-      this.oversampleFactor = query.oversampleFactor;
       this.textQuery = query.textQuery;
       this.searchColumns = query.searchColumns;
       this.fullTextQueryJson = query.fullTextQueryJson;
@@ -499,11 +487,6 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
-    public Builder oversampleFactor(Float oversampleFactor) {
-      this.oversampleFactor = oversampleFactor;
-      return this;
-    }
-
     public Builder textQuery(String textQuery) {
       this.textQuery = textQuery;
       return this;
@@ -535,10 +518,6 @@ public class LanceSearchQuery implements Serializable {
       }
       if (offset != null && offset < 0) {
         throw new IllegalArgumentException("offset must be non-negative");
-      }
-      if (oversampleFactor != null
-          && (!Float.isFinite(oversampleFactor) || oversampleFactor < 1.0f)) {
-        throw new IllegalArgumentException("oversample_factor must be finite and at least 1.0");
       }
       if (Boolean.TRUE.equals(bypassVectorIndex) && Boolean.TRUE.equals(fastSearch)) {
         throw new IllegalArgumentException(

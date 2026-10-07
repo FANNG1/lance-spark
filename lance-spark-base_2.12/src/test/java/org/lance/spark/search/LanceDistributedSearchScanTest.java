@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -85,6 +86,31 @@ class LanceDistributedSearchScanTest {
   }
 
   @Test
+  void fallbackUnitsDisableTheIndexSoTheyStayExact() {
+    LanceSearchQuery query =
+        LanceSearchQuery.builder(SearchType.VECTOR)
+            .tableId(Arrays.asList("ns", "table"))
+            .namespaceImpl("dir")
+            .vector(Collections.singletonList(0.0f))
+            .vectorColumn("vector")
+            .build();
+
+    // A fragment-restricted scan still picks up an index segment covering that fragment, so the
+    // flat unit has to opt out explicitly or it answers approximately. bypass_vector_index plans
+    // nothing but flat units, which is why dropping this turns bypass into an ANN search.
+    ScanOptions fallback =
+        LanceDistributedSearchColumnarPartitionReader.buildScanOptions(
+            LanceDistributedSearchInputPartition.forFragment(new StructType(), query, 1));
+    assertFalse(fallback.getNearest().get().isUseIndex(), "flat unit must not use the index");
+
+    ScanOptions indexed =
+        LanceDistributedSearchColumnarPartitionReader.buildScanOptions(
+            LanceDistributedSearchInputPartition.forIndexSegment(
+                new StructType(), query, UUID.randomUUID()));
+    assertTrue(indexed.getNearest().get().isUseIndex(), "indexed unit must use the index");
+  }
+
+  @Test
   void identifiesVectorIndexesByDetailsTypeInsteadOfConcreteIndexType() {
     assertTrue(
         LanceDistributedSearchScan.isVectorIndexTypeUrl("/lance.index.pb.VectorIndexDetails"));
@@ -97,27 +123,6 @@ class LanceDistributedSearchScanTest {
     assertFalse(
         LanceDistributedSearchScan.isVectorIndexTypeUrl(
             "type.googleapis.com/example.MyVectorIndexDetails"));
-  }
-
-  @Test
-  void computesOversampledLocalCandidateCount() {
-    assertEquals(7, LanceDistributedSearchScan.localCandidateK(7, null));
-    assertEquals(11, LanceDistributedSearchScan.localCandidateK(7, 1.5f));
-  }
-
-  @Test
-  void rejectsInvalidOversampleFactor() {
-    assertThrows(
-        IllegalArgumentException.class, () -> LanceDistributedSearchScan.localCandidateK(7, 0.99f));
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> LanceDistributedSearchScan.localCandidateK(7, Float.NaN));
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> LanceDistributedSearchScan.localCandidateK(7, Float.POSITIVE_INFINITY));
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> LanceDistributedSearchScan.localCandidateK(Integer.MAX_VALUE, 2.0f));
   }
 
   @Test

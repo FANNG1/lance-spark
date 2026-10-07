@@ -96,7 +96,6 @@ object LanceSearchTableFunctions {
       .bypassVectorIndex(optionalBoolean(parsed, "bypass_vector_index").orNull)
       .fastSearch(optionalBoolean(parsed, "fast_search").orNull)
       .prefilter(optionalBoolean(parsed, "prefilter").orNull)
-      .oversampleFactor(optionalFloat(parsed, "oversample_factor").orNull)
 
     relation("VECTOR_SEARCH", schema, builder.build(), resolved)
   }
@@ -289,8 +288,8 @@ object LanceSearchTableFunctions {
       CaseInsensitiveStringMap.empty())
 
   /**
-   * Search executed by Spark tasks, one per searchable unit of the dataset. Every worker
-   * over-fetches `k + offset` rows (LanceSearchQuery.k = userK + offset, set by
+   * Search executed by Spark tasks, one per searchable unit of the dataset. Every worker requests
+   * `k + offset` rows (LanceSearchQuery.k = userK + offset, set by
    * LanceSearchTableFunctions.vectorSearch), so the merge has to happen here: sort globally, drop
    * the first `offset` rows, then take `userK`.
    */
@@ -330,9 +329,12 @@ object LanceSearchTableFunctions {
 
   private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
     val spark = SparkSession.active
-    val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "false").toBoolean
+    // Boolean.parseBoolean, not String.toBoolean: the latter throws on anything but
+    // "true"/"false", and this runs for every VECTOR_SEARCH, so a conf set to "1" or "on" would
+    // fail queries that never asked for distributed execution.
+    val enabled = java.lang.Boolean.parseBoolean(
+      spark.conf.get("spark.sql.lance.search.distributed.enabled", "false"))
     if (!enabled) return false
-    if (query.getSearchType != SearchType.VECTOR) return false
     // Fragment-restricted fallback scans require prefilter=true in lance-core. Reject an explicit
     // false instead of silently changing either the filter semantics or the requested execution
     // path.

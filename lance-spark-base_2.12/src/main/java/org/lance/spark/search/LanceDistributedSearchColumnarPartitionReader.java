@@ -138,11 +138,20 @@ public class LanceDistributedSearchColumnarPartitionReader
           "vector column must be resolved on the driver before scheduling worker tasks");
     }
 
+    boolean fallbackUnit = p.getIndexSegments().isEmpty();
+
     Query.Builder q =
         new Query.Builder()
             .setColumn(column)
             .setKey(toFloatArray(base.getVector()))
             .setK(base.getK());
+    // The driver plans a fallback unit for fragments no index segment covers, so it must answer
+    // with an exact flat scan. lance-core defaults use_index to true, and a fragment-restricted
+    // scan still picks up any index segment covering the fragment, so leaving the default would
+    // quietly turn flat units - and every unit under bypass_vector_index - into ANN searches.
+    if (fallbackUnit) {
+      q.setUseIndex(false);
+    }
     if (base.getDistanceType() != null && !base.getDistanceType().isEmpty()) {
       q.setDistanceType(parseDistanceType(base.getDistanceType()));
     }
@@ -157,7 +166,6 @@ public class LanceDistributedSearchColumnarPartitionReader
     }
 
     ScanOptions.Builder b = new ScanOptions.Builder().nearest(q.build());
-    boolean fallbackUnit = p.getIndexSegments().isEmpty();
     boolean userRequestedPrefilter = Boolean.TRUE.equals(base.getPrefilter());
     boolean hasFilter = base.getFilter() != null && !base.getFilter().isEmpty();
     // A fragment-restricted nearest scan only runs with prefilter=true: lance-core otherwise
