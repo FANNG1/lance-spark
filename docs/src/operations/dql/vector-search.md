@@ -71,8 +71,14 @@ By default, Spark plans `VECTOR_SEARCH` with one input partition and calls the L
 dataset from its executors, searches vector-index segments and uncovered fragments in parallel,
 and globally merges their candidates. The merge sorts by the distance each task reported, so each
 task returns only its own top `num_results + offset` rows: a row outside a task's local top k
-cannot enter the global top k. `nprobes` and `refine_factor` apply per task and behave as they do
-on the namespace path.
+cannot enter the global top k. `nprobes` and `refine_factor` apply per task.
+
+Distributed execution matches the probe semantics of the Lance version this connector bundles, so
+`nprobes` sets a lower bound and the search may probe further. A namespace server running a
+different Lance version can interpret `nprobes` as an exact probe count instead, in which case the
+two paths search with different probe ceilings and recall is worth re-checking after enabling the
+flag. Raise `nprobes`, or use `bypass_vector_index => true` for an exact baseline, if the results
+need to be comparable.
 A filtered distributed search must pass `prefilter=true`, which returns the true filtered top k.
 Namespace execution defaults to `prefilter=false` and applies the filter after choosing the top k,
 which usually returns fewer rows; a distributed plan cannot reproduce that, so omitting `prefilter`
