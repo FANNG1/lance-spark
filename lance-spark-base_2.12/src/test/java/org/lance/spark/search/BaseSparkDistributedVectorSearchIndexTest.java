@@ -32,12 +32,18 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -226,41 +232,96 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
-  void plannedPartitionsPinTheOpenedDatasetVersion() throws Exception {
+  void plannedPartitionsReadTheVersionTheyWerePlannedAgainst() throws Exception {
     String table = createTable("idx_snapshot", 2);
     long plannedVersion;
     try (Dataset ds = openDataset(table)) {
       plannedVersion = ds.version();
     }
 
-    InputPartition[] parts = planPartitions(table, 3, null, null);
+    InputPartition[] parts = planPartitionsForExecution(table, 3);
     assertTrue(parts.length > 0);
     for (InputPartition part : parts) {
-      Long pinned =
-          ((LanceDistributedSearchInputPartition) part)
-              .getQuery()
-              .getReadOptions()
-              .getRef()
-              .getVersionNumber()
-              .get();
-      assertEquals(plannedVersion, pinned.longValue());
+      assertEquals(plannedVersion, pinnedVersionOf(part));
     }
 
-    spark.sql(
-        "INSERT INTO " + table + " VALUES (9999, array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))");
+    // DELETE, not INSERT: a new fragment would not be in the planned partition list at all, so a
+    // worker that wrongly opened the latest version could still pass. Deleting changes the
+    // visibility of a fragment these partitions already reference.
+    spark.sql("DELETE FROM " + table + " WHERE id = 0");
     try (Dataset ds = openDataset(table)) {
-      assertTrue(ds.version() > plannedVersion);
+      assertTrue(ds.version() > plannedVersion, "the delete must produce a new version");
     }
+    assertFalse(
+        ids(collect(vectorSearchSql(table, 3, ""), true)).contains(0),
+        "a freshly planned search must not see the deleted row");
+
+    // Round-trip through Java serialization the way Spark ships a partition to an executor, then
+    // execute the pre-delete partitions: they must still read the pinned version.
+    List<Integer> idsFromPlannedPartitions = new ArrayList<>();
+    LanceDistributedSearchPartitionReaderFactory factory =
+        new LanceDistributedSearchPartitionReaderFactory();
     for (InputPartition part : parts) {
-      assertEquals(
-          plannedVersion,
-          ((LanceDistributedSearchInputPartition) part)
-              .getQuery()
-              .getReadOptions()
-              .getRef()
-              .getVersionNumber()
-              .get()
-              .longValue());
+      InputPartition shipped = roundTrip(part);
+      assertEquals(plannedVersion, pinnedVersionOf(shipped), "the pinned ref must survive");
+      try (PartitionReader<ColumnarBatch> reader = factory.createColumnarReader(shipped)) {
+        while (reader.next()) {
+          ColumnarBatch batch = reader.get();
+          for (int row = 0; row < batch.numRows(); row++) {
+            idsFromPlannedPartitions.add(batch.column(0).getInt(row));
+          }
+        }
+      }
+    }
+    assertTrue(
+        idsFromPlannedPartitions.contains(0),
+        "the planned partitions pin the pre-delete version, so they still see id 0; got "
+            + idsFromPlannedPartitions);
+  }
+
+  /**
+   * Plans partitions that can be executed directly through the reader factory: no {@code columns}
+   * projection, so the scan returns every field the partition schema declares.
+   */
+  private InputPartition[] planPartitionsForExecution(String table, int k) throws Exception {
+    LanceDataset lanceTable = lanceTable(table);
+    List<Float> queryVector = new ArrayList<>();
+    for (int i = 0; i < DIM; i++) {
+      queryVector.add(0.0f);
+    }
+    LanceSearchQuery query =
+        LanceSearchQuery.builder(SearchType.VECTOR)
+            .tableId(lanceTable.readOptions().getTableId())
+            .namespaceImpl(lanceTable.getNamespaceImpl())
+            .namespaceProperties(lanceTable.getNamespaceProperties())
+            .readOptions(lanceTable.readOptions())
+            .initialStorageOptions(lanceTable.getInitialStorageOptions())
+            .vector(queryVector)
+            .topK(k)
+            .vectorColumn(VECTOR_COLUMN)
+            .nprobes(NUM_PARTITIONS)
+            .build();
+    return new LanceDistributedSearchScan(lanceTable.schema(), query).planInputPartitions();
+  }
+
+  private static long pinnedVersionOf(InputPartition part) {
+    return ((LanceDistributedSearchInputPartition) part)
+        .getQuery()
+        .getReadOptions()
+        .getRef()
+        .getVersionNumber()
+        .get();
+  }
+
+  /** Mimics Spark shipping an InputPartition from the driver to an executor. */
+  private static InputPartition roundTrip(InputPartition part) throws Exception {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+      out.writeObject(part);
+    }
+    try (ObjectInputStream in =
+        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+      return (InputPartition) in.readObject();
     }
   }
 
@@ -306,9 +367,10 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   @Test
-  void everyUnitRequestsTheSameCandidateCount() throws Exception {
-    // The merge sorts by the distance each unit reported, so the global top k is always contained
-    // in the union of the per-unit top k: no unit needs to over-fetch, indexed or flat.
+  void plannerPropagatesCandidateKToEveryUnit() throws Exception {
+    // Narrow claim: the planner hands every unit the same candidate count. That the merge is then
+    // correct is a separate property, covered by
+    // distributedMergeKeepsTopKConcentratedInOneUnit.
     String table = createTable("idx_candidate_k", 3);
     List<Integer> fragments = fragmentIds(table);
     buildSegmentPerFragment(table, fragments.subList(0, fragments.size() - 1));
@@ -321,10 +383,28 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
           ((LanceDistributedSearchInputPartition) part).getQuery().getK(),
           "every unit asks for exactly the requested candidate count");
     }
+  }
 
+  @Test
+  void distributedMergeKeepsTopKConcentratedInOneUnit() throws Exception {
+    // createTable lays ids out by fragment (0-63, 64-127, 128-191) with vector = [id]*DIM, and the
+    // query sits at the origin, so the whole global top k lives in the first fragment's segment
+    // and every other segment's nearest row is far away. A unit that returned fewer than k rows
+    // would therefore be filled in from the distant segments and the result would visibly change.
+    // nprobes covers all IVF partitions, so the comparison is exact rather than recall-dependent.
+    String table = createTable("idx_concentrated", 3);
+    buildSegmentPerFragment(table, fragmentIds(table));
+
+    InputPartition[] parts = planPartitions(table, 5, null, null);
+    assertEquals(3, parts.length, "one indexed unit per segment");
+
+    String sql = vectorSearchSql(table, 5, "");
+    List<Integer> distributed = ids(collect(sql, true));
     assertEquals(
-        ids(collect(vectorSearchSql(table, 7, ""), false)),
-        ids(collect(vectorSearchSql(table, 7, ""), true)));
+        java.util.Arrays.asList(0, 1, 2, 3, 4),
+        distributed,
+        "the merge must keep the top k that one unit contributed");
+    assertEquals(ids(collect(sql, false)), distributed);
   }
 
   @Test

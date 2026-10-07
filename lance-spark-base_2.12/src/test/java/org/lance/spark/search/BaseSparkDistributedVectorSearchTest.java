@@ -18,7 +18,6 @@ import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -36,10 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Integration tests for distributed VECTOR_SEARCH (the path through {@link
  * LanceDistributedSearchTable}).
  *
- * <p>These tests cover the fallback-only path: with no vector index built on the table, {@link
+ * <p>This class covers the fallback-only path: with no vector index on the table, {@link
  * LanceDistributedSearchScan} emits one fallback partition per fragment and each Spark task runs
- * flat KNN. Indexed-unit behavior (IVF_PQ etc.) is intentionally not exercised here yet — see the
- * {@code @Disabled} placeholder at the bottom of this class.
+ * flat KNN. Indexed units are covered by {@code BaseSparkDistributedVectorSearchIndexTest}, which
+ * builds real index segments through the Java API.
  */
 public abstract class BaseSparkDistributedVectorSearchTest {
   private static final String CATALOG_NAME = "lance_dist_search";
@@ -240,25 +239,5 @@ public abstract class BaseSparkDistributedVectorSearchTest {
       root = root.getCause();
     }
     return String.valueOf(root.getMessage());
-  }
-
-  /**
-   * TODO: end-to-end coverage for indexed-unit path with IVF_PQ.
-   *
-   * <p>lance-spark does not yet support {@code CREATE INDEX ... USING IVF_PQ} via SQL; once that
-   * DDL is wired through, this test should:
-   *
-   * <ol>
-   *   <li>Build a table large enough for IVF_PQ training (>= 256 rows).
-   *   <li>{@code CREATE INDEX ... USING IVF_PQ} on the vector column.
-   *   <li>Enable {@code spark.sql.lance.search.distributed.enabled=true}.
-   *   <li>Run VECTOR_SEARCH and assert {@link LanceDistributedSearchScan} planned indexed units
-   *       (one per segment) and the merged top-k matches the non-distributed reference run.
-   * </ol>
-   */
-  @Test
-  @Disabled("TODO: pending CREATE INDEX ... USING IVF_PQ support in lance-spark SQL extensions")
-  void distributedIndexedUnitWithIvfPqIndex() {
-    // Intentionally empty until IVF_PQ DDL is available.
   }
 }
