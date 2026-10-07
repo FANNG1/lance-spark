@@ -247,18 +247,22 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       }
       sawIndexForColumn = true;
       Optional<String> indexMetric = resolveIndexMetric(dataset, idx);
-      // Only a metric we actually resolved can contradict the query. When it cannot be read from
-      // the index metadata, lance-core decides: a worker hands the segment to `indexSegments(...)`,
-      // which opens the index and rejects a genuine mismatch itself (see the with_index_segments
-      // branch of rust/lance/src/dataset/scanner.rs).
-      if (normalizedRequested != null
-          && indexMetric.isPresent()
-          && !normalizedRequested.equals(indexMetric.get())) {
-        LOG.warn(
-            "Ignoring vector index {} because query metric {} does not match index metric {}",
-            idx.getName(),
-            normalizedRequested,
-            indexMetric.get());
+      if (!indexMetricIsUsable(normalizedRequested, indexMetric)) {
+        // Two different diagnoses, one decision. A real mismatch is a user error they can fix by
+        // changing distance_type; an unreadable metric is a metadata problem no SQL change helps.
+        if (indexMetric.isPresent()) {
+          LOG.warn(
+              "Ignoring vector index {} because query metric {} does not match index metric {}",
+              idx.getName(),
+              normalizedRequested,
+              indexMetric.get());
+        } else {
+          LOG.warn(
+              "Ignoring vector index {} because its metric could not be read from the index "
+                  + "metadata, so it cannot be confirmed to match query metric {}",
+              idx.getName(),
+              normalizedRequested);
+        }
         continue;
       }
       List<VectorIndexSegment> segments = new ArrayList<>();
@@ -348,6 +352,23 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
    * rust/lance/src/index.rs returns "Please upgrade lance to 0.8+ to use this function" - so
    * namespace execution fails on these datasets too.
    */
+  /**
+   * Whether an index may answer a query asking for {@code requested}.
+   *
+   * <p>An omitted metric accepts any index - lance-core then searches with the index's own metric,
+   * and {@code planPartitionsOnce} resolves it when the plan also has flat units. A requested
+   * metric needs a resolved, equal index metric: unlike the namespace path, which opens the index
+   * to read its metric and silently brute-forces on a mismatch, this planner can only read index
+   * metadata, and handing an unverified segment to {@code indexSegments(...)} makes lance-core fail
+   * the task outright rather than fall back. Losing the index is the safe direction.
+   */
+  static boolean indexMetricIsUsable(String requested, Optional<String> indexMetric) {
+    if (requested == null) {
+      return true;
+    }
+    return indexMetric.isPresent() && requested.equals(indexMetric.get());
+  }
+
   static Set<Integer> requireFragmentCoverage(
       String indexName, Optional<List<Integer>> fragmentIds) {
     return fragmentIds

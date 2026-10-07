@@ -126,6 +126,21 @@ class LanceDistributedSearchScanTest {
   }
 
   @Test
+  void anIndexIsUsableOnlyWhenItsMetricIsResolvedAndEqual() {
+    // Omitted metric: any index will do, lance-core searches with the index's own metric.
+    assertTrue(LanceDistributedSearchScan.indexMetricIsUsable(null, Optional.of("cosine")));
+    assertTrue(LanceDistributedSearchScan.indexMetricIsUsable(null, Optional.empty()));
+
+    // Requested metric: only a resolved, equal one qualifies.
+    assertTrue(LanceDistributedSearchScan.indexMetricIsUsable("l2", Optional.of("l2")));
+    assertFalse(LanceDistributedSearchScan.indexMetricIsUsable("l2", Optional.of("cosine")));
+    assertFalse(
+        LanceDistributedSearchScan.indexMetricIsUsable("l2", Optional.empty()),
+        "an unverifiable metric must not be assumed to match: handing the segment to "
+            + "indexSegments(...) makes lance-core fail the task instead of falling back");
+  }
+
+  @Test
   void segmentWithoutFragmentBitmapIsRejected() {
     assertEquals(
         new HashSet<>(Arrays.asList(1, 2)),
