@@ -349,22 +349,19 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     List<Integer> reference = ids(collect(sql, false));
     assertFalse(reference.isEmpty(), "prefilter=false remains supported by namespace execution");
 
+    // With a filter present the "pick your semantics" check fires first and names both options,
+    // which is the more useful message of the two.
     Exception error = assertThrows(Exception.class, () -> collect(sql, true));
+    assertTrue(rootMessage(error).contains("requires prefilter=true"), rootMessage(error));
+
+    // Without a filter, prefilter=false has nothing to act on, but it is still rejected rather
+    // than quietly ignored.
+    String unfiltered = vectorSearchSql(table, 5, ", prefilter => false");
+    Exception unfilteredError = assertThrows(Exception.class, () -> collect(unfiltered, true));
     assertTrue(
-        rootMessage(error).contains("Distributed VECTOR_SEARCH does not support prefilter=false"),
-        rootMessage(error));
-  }
-
-  @Test
-  void indexedSearchAppliesFilterBeforeTopK() throws Exception {
-    String table = createTable("idx_filter", 4);
-    buildSegmentPerFragment(table, fragmentIds(table));
-
-    String sql = vectorSearchSql(table, 5, ", filter => 'id % 2 = 0'");
-    assertEquals(
-        java.util.Arrays.asList(0, 2, 4, 6, 8),
-        ids(collect(sql, true)),
-        "a filtered distributed search must return the true filtered top-k");
+        rootMessage(unfilteredError)
+            .contains("Distributed VECTOR_SEARCH does not support prefilter=false"),
+        rootMessage(unfilteredError));
   }
 
   @Test
@@ -375,7 +372,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     buildSegmentPerFragment(indexed, fragmentIds(indexed));
     String unindexed = createTable("idx_semantics_plain", 4);
 
-    String filterArg = ", filter => 'id % 2 = 0'";
+    String filterArg = ", filter => 'id % 2 = 0', prefilter => true";
     List<Integer> indexedRows = ids(collect(vectorSearchSql(indexed, 5, filterArg), true));
     List<Integer> unindexedRows = ids(collect(vectorSearchSql(unindexed, 5, filterArg), true));
     assertEquals(java.util.Arrays.asList(0, 2, 4, 6, 8), unindexedRows, "unindexed table");

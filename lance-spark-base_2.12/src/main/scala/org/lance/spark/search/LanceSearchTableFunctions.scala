@@ -335,9 +335,17 @@ object LanceSearchTableFunctions {
     val enabled = java.lang.Boolean.parseBoolean(
       spark.conf.get("spark.sql.lance.search.distributed.enabled", "false"))
     if (!enabled) return false
-    // Fragment-restricted fallback scans require prefilter=true in lance-core. Reject an explicit
-    // false instead of silently changing either the filter semantics or the requested execution
-    // path.
+    // Fragment-restricted fallback scans require prefilter=true in lance-core, so a distributed
+    // plan can only ever prefilter. Namespace execution defaults to prefilter=false, which
+    // post-filters the top k and therefore returns a different - usually smaller - set of rows.
+    // Make the user pick the semantics instead of silently switching them.
+    val hasFilter = query.getFilter != null && !query.getFilter.isEmpty
+    if (hasFilter && java.lang.Boolean.TRUE != query.getPrefilter) {
+      throw new IllegalArgumentException(
+        "Distributed VECTOR_SEARCH with a filter requires prefilter=true, which returns the true " +
+          "filtered top k; disable spark.sql.lance.search.distributed.enabled to keep namespace " +
+          "post-filter semantics, where the filter is applied after the top k is chosen")
+    }
     if (java.lang.Boolean.FALSE == query.getPrefilter) {
       throw new IllegalArgumentException(
         "Distributed VECTOR_SEARCH does not support prefilter=false; disable " +

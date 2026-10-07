@@ -63,6 +63,9 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
 | `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. `bypass_vector_index` and `fast_search` cannot both be true. |
 
+`spark.sql.lance.search.distributed.enabled` has no effect on `HYBRID_SEARCH`: its vector side
+always runs through the namespace `queryTable` API.
+
 ## Reranking
 
 Hybrid search performs reciprocal rank fusion in Spark:

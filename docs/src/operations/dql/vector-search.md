@@ -73,9 +73,12 @@ and globally merges their candidates. The merge sorts by the distance each task 
 task returns only its own top `num_results + offset` rows: a row outside a task's local top k
 cannot enter the global top k. `nprobes` and `refine_factor` apply per task and behave as they do
 on the namespace path.
-Distributed execution does not support `lower_bound`, `upper_bound`, or an explicit
-`prefilter=false`; these combinations fail during planning. Disable distributed execution to run
-them through the namespace.
+A filtered distributed search must pass `prefilter=true`, which returns the true filtered top k.
+Namespace execution defaults to `prefilter=false` and applies the filter after choosing the top k,
+which usually returns fewer rows; a distributed plan cannot reproduce that, so omitting `prefilter`
+with a `filter` fails during planning instead of silently changing the result. `lower_bound` and
+`upper_bound` are not supported either. Disable distributed execution to run any of these through
+the namespace.
 
 ## Validation
 

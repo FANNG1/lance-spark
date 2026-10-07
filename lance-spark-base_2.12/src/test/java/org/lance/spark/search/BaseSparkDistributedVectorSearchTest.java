@@ -202,6 +202,38 @@ public abstract class BaseSparkDistributedVectorSearchTest {
         rootMessage(error));
   }
 
+  @Test
+  void aFilterRequiresAnExplicitPrefilterChoice() {
+    Assumptions.assumeFalse(
+        spark.version().startsWith("3.4."),
+        "Spark 3.4 table-valued functions do not support named arguments");
+    String fullName = createFiveFragmentTable();
+    String filtered =
+        "SELECT id FROM VECTOR_SEARCH(table => '"
+            + fullName
+            + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 1, filter => 'id = 4'";
+
+    // Namespace execution defaults to prefilter=false: it takes the top 1 (id 0), then applies
+    // the filter, so nothing comes back. This is the semantics a distributed plan cannot offer,
+    // because a fragment-restricted scan has to prefilter.
+    spark.conf().set("spark.sql.lance.search.distributed.enabled", "false");
+    assertEquals(
+        0,
+        spark.sql(filtered + ")").collectAsList().size(),
+        "namespace execution post-filters the top k");
+
+    // Silently prefiltering instead would return id 4 here, so the query is rejected until the
+    // user says which semantics they want.
+    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    Exception error =
+        assertThrows(Exception.class, () -> spark.sql(filtered + ")").collectAsList());
+    assertTrue(rootMessage(error).contains("requires prefilter=true"), rootMessage(error));
+
+    List<Row> prefiltered = spark.sql(filtered + ", prefilter => true)").collectAsList();
+    assertEquals(1, prefiltered.size(), "prefilter=true yields the true filtered top k");
+    assertEquals(4, prefiltered.get(0).getInt(0));
+  }
+
   private static String rootMessage(Throwable throwable) {
     Throwable root = throwable;
     while (root.getCause() != null) {

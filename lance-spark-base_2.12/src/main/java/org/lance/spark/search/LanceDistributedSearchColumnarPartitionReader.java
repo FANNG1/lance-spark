@@ -166,18 +166,16 @@ public class LanceDistributedSearchColumnarPartitionReader
     }
 
     ScanOptions.Builder b = new ScanOptions.Builder().nearest(q.build());
-    boolean userRequestedPrefilter = Boolean.TRUE.equals(base.getPrefilter());
-    boolean hasFilter = base.getFilter() != null && !base.getFilter().isEmpty();
     // A fragment-restricted nearest scan only runs with prefilter=true: lance-core otherwise
     // rejects it outright with "Not supported: This operation is not supported for fragment
-    // scan" (rust/lance/src/dataset/scanner.rs). Fallback units therefore always set it.
+    // scan" (ensure_not_fragment_scan in rust/lance/src/dataset/scanner.rs). Fallback units
+    // therefore always set it, whether or not a filter is present.
     //
-    // Indexed units are not under that restriction, but they have to match it whenever a
-    // filter is present. Otherwise each indexed unit applies the filter *after* picking its
-    // own top-k, and the merged result depends on whether the table happens to carry a vector
-    // index: the same query over the same rows returns different ids for an indexed and an
-    // unindexed table, and neither matches the true filtered top-k.
-    if (userRequestedPrefilter || fallbackUnit || hasFilter) {
+    // Indexed units set it only when the user asked. A filtered query cannot reach here without
+    // prefilter=true - shouldUseDistributed rejects it - so indexed and fallback units always
+    // agree on filter semantics: the merged result does not depend on whether the table happens
+    // to carry a vector index.
+    if (fallbackUnit || Boolean.TRUE.equals(base.getPrefilter())) {
       b.prefilter(true);
     }
     if (base.getFilter() != null) {
