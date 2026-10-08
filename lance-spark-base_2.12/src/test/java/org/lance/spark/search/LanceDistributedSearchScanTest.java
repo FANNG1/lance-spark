@@ -67,7 +67,7 @@ class LanceDistributedSearchScanTest {
   }
 
   @Test
-  void explicitNprobesMatchesBundledQueryTableSemantics() {
+  void explicitNprobesSetsFixedProbeBounds() {
     LanceSearchQuery query =
         LanceSearchQuery.builder(SearchType.VECTOR)
             .tableId(Arrays.asList("ns", "table"))
@@ -79,14 +79,12 @@ class LanceDistributedSearchScanTest {
     LanceDistributedSearchInputPartition partition =
         LanceDistributedSearchInputPartition.forFragment(new StructType(), query, 1);
 
-    // The bundled Lance forwards query_table's nprobes as a minimum and leaves the maximum unset,
-    // so a worker must do the same or the distributed path searches with a lower probe ceiling -
-    // and worse recall - than the namespace path for the same SQL. A Lance upgrade that makes
-    // query_table treat nprobes as an exact minimum and maximum has to flip this expectation.
+    // An explicit nprobes means exactly that many probes, matching how lance maps the field on a
+    // namespace query since lance#9184.
     ScanOptions options = LanceDistributedSearchColumnarPartitionReader.buildScanOptions(partition);
     Query nearest = options.getNearest().get();
     assertEquals(7, nearest.getMinimumNprobes());
-    assertEquals(Optional.empty(), nearest.getMaximumNprobes(), "the probe ceiling stays open");
+    assertEquals(Optional.of(7), nearest.getMaximumNprobes(), "the probe ceiling is pinned too");
   }
 
   @Test

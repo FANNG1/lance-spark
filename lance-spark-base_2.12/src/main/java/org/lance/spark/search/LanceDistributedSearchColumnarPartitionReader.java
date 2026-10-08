@@ -156,16 +156,11 @@ public class LanceDistributedSearchColumnarPartitionReader
       q.setDistanceType(parseDistanceType(base.getDistanceType()));
     }
     if (base.getNprobes() != null) {
-      // setMinimumNprobes, not setNprobes: on the Lance version this connector bundles,
-      // DirectoryNamespace::query_table forwards the request's nprobes as a *minimum* and leaves
-      // the maximum unset, so the search may probe further. setNprobes would pin minimum = maximum
-      // and give a filtered distributed search a lower probe ceiling - and therefore worse recall -
-      // than the same SQL run through the namespace.
-      //
-      // Lance has since changed query_table to treat nprobes as an exact minimum and maximum. When
-      // the bundled Lance is upgraded past that change, this has to become setNprobes and the unit
-      // test pinning it has to expect maximum == minimum.
-      q.setMinimumNprobes(base.getNprobes());
+      // setNprobes pins minimum = maximum = n, which is how lance now maps the nprobes field of a
+      // namespace query (lance#9184). A server still on an older mapping forwards it as a minimum
+      // and leaves the ceiling open, so the two paths can reach different recall for the same
+      // tuning; see the note in docs/src/operations/dql/vector-search.md.
+      q.setNprobes(base.getNprobes());
     }
     if (base.getEf() != null) {
       q.setEf(base.getEf());
