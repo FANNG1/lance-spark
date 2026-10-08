@@ -88,6 +88,7 @@ namespace client and refresh credentials when opening the dataset.
 The planner creates one task for every selected vector-index segment and one flat-search task for
 each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
 `fast_search=true` searches only indexed fragments.
+
 A fragment-restricted scan can only prefilter, so a distributed plan cannot reproduce namespace
 execution's default `prefilter=false`, which applies the filter *after* the top k is chosen and
 therefore usually returns fewer rows. A filtered distributed search must say `prefilter=true`

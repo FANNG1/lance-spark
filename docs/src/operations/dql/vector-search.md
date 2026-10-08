@@ -77,6 +77,7 @@ Distributed execution treats `nprobes` as an exact probe count. A namespace serv
 forward it as a lower bound and let the search probe further, in which case the two paths reach
 different recall for the same tuning. Re-check recall after enabling the flag; raise `nprobes`, or
 use `bypass_vector_index => true` for an exact baseline, if the results need to be comparable.
+
 A filtered distributed search must pass `prefilter=true`, which returns the true filtered top k.
 Namespace execution defaults to `prefilter=false` and applies the filter after choosing the top k,
 which usually returns fewer rows; a distributed plan cannot reproduce that, so omitting `prefilter`
