@@ -161,11 +161,11 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
                       .getReadOptions()
                       .withRef(Utils.pinOpenedRef(dataset, query.getReadOptions().getRef())))
               .build();
+      boolean mixedPlan = !liveSegments.isEmpty() && !fallbackFragments.isEmpty();
       // Indexed tasks search with the index's metric when none is given, while flat tasks would
       // default to L2; the global merge needs both on the same metric.
       if ((resolvedQuery.getDistanceType() == null || resolvedQuery.getDistanceType().isEmpty())
-          && !liveSegments.isEmpty()
-          && !fallbackFragments.isEmpty()) {
+          && mixedPlan) {
         String indexMetric =
             vectorIndex
                 .get()
@@ -179,8 +179,22 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
                                 + "unindexed fragments"));
         resolvedQuery = resolvedQuery.toBuilder().distanceType(indexMetric).build();
       }
+      // The merge ranks every unit's rows against each other, so they all have to report distances
+      // on one scale. A quantized index (IVF_PQ and friends) reports the quantized distance, while
+      // a flat unit always reports the exact one. refine_factor makes an indexed unit take the
+      // original vectors back and re-score, which is what lance-core itself does for this plan
+      // shape - knn_combined re-scores exactly when a plan has uncovered fragments or stale rows,
+      // and returns the ANN distances untouched otherwise. Mirror that: refine only a mixed plan,
+      // so an all-indexed plan keeps reporting what the namespace path would report. A factor of 1
+      // re-scores without enlarging the candidate set, since lance-core gates the re-score on the
+      // factor being present rather than on its value.
+      LanceSearchQuery indexedQuery =
+          mixedPlan && resolvedQuery.getRefineFactor() == null
+              ? resolvedQuery.toBuilder().refineFactor(1).build()
+              : resolvedQuery;
+
       List<LanceDistributedSearchInputPartition> units =
-          planUnits(resolvedQuery, liveSegments, fallbackFragments);
+          planUnits(indexedQuery, resolvedQuery, liveSegments, fallbackFragments);
 
       long indexedCount = units.stream().filter(u -> !u.getIndexSegments().isEmpty()).count();
       LOG.info(
@@ -200,13 +214,18 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   }
 
   private List<LanceDistributedSearchInputPartition> planUnits(
-      LanceSearchQuery query, List<UUID> liveSegments, Set<Integer> fallbackFragments) {
+      LanceSearchQuery indexedQuery,
+      LanceSearchQuery fallbackQuery,
+      List<UUID> liveSegments,
+      Set<Integer> fallbackFragments) {
     List<LanceDistributedSearchInputPartition> units = new ArrayList<>();
     for (UUID segmentUuid : liveSegments) {
-      units.add(LanceDistributedSearchInputPartition.forIndexSegment(schema, query, segmentUuid));
+      units.add(
+          LanceDistributedSearchInputPartition.forIndexSegment(schema, indexedQuery, segmentUuid));
     }
     for (Integer fragmentId : fallbackFragments) {
-      units.add(LanceDistributedSearchInputPartition.forFragment(schema, query, fragmentId));
+      units.add(
+          LanceDistributedSearchInputPartition.forFragment(schema, fallbackQuery, fragmentId));
     }
     return units;
   }

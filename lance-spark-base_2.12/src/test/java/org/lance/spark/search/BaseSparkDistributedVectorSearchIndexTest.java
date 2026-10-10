@@ -21,6 +21,7 @@ import org.lance.index.IndexOptions;
 import org.lance.index.IndexParams;
 import org.lance.index.IndexType;
 import org.lance.index.vector.IvfBuildParams;
+import org.lance.index.vector.PQBuildParams;
 import org.lance.index.vector.VectorIndexParams;
 import org.lance.index.vector.VectorTrainer;
 import org.lance.spark.LanceDataset;
@@ -533,6 +534,37 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
 
   // ---------------------------------------------------------------- helpers
 
+  @Test
+  void mixedPlanWithAQuantizedIndexReportsComparableDistances() throws Exception {
+    // A quantized index reports the quantized distance, a flat unit the exact one. Ranking the two
+    // against each other in the global merge compares incomparable numbers, so the plan has to
+    // re-score the indexed side first. One segment keeps the candidate set identical to what the
+    // namespace path searches, which makes the comparison row-for-row.
+    String table = createTable("idx_pq_mixed", 4);
+    List<Integer> fragments = fragmentIds(table);
+    buildPqSegment(table, fragments.subList(0, fragments.size() - 1));
+
+    InputPartition[] parts = planPartitions(table, 10, null, null);
+    long indexed =
+        java.util.Arrays.stream(parts)
+            .filter(p -> !((LanceDistributedSearchInputPartition) p).getIndexSegments().isEmpty())
+            .count();
+    assertEquals(1, indexed, "one indexed unit");
+    assertEquals(parts.length - 1, 1, "and one flat unit for the uncovered fragment");
+
+    String sql = vectorSearchSql(table, 10, "");
+    List<Row> distributed = collect(sql, true);
+    List<Row> reference = collect(sql, false);
+    assertEquals(ids(reference), ids(distributed), "a mixed quantized plan must match namespace");
+    for (int i = 0; i < reference.size(); i++) {
+      assertEquals(
+          reference.get(i).getFloat(1),
+          distributed.get(i).getFloat(1),
+          1e-3f,
+          "row " + i + " must report the namespace distance, not a quantized one");
+    }
+  }
+
   private String createTable(String name, int inserts) {
     String fullName = CATALOG_NAME + ".default." + name;
     spark.sql(
@@ -559,6 +591,48 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
               + ", 1, 1)");
     }
     return fullName;
+  }
+
+  /** One IVF_PQ segment over the given fragments; PQ needs a precomputed codebook per segment. */
+  private void buildPqSegment(String table, List<Integer> fragments) throws Exception {
+    try (Dataset ds = openDataset(table)) {
+      IvfBuildParams trainParams =
+          new IvfBuildParams.Builder().setNumPartitions(NUM_PARTITIONS).setMaxIters(2).build();
+      float[] centroids = VectorTrainer.trainIvfCentroids(ds, VECTOR_COLUMN, trainParams);
+      IvfBuildParams ivfParams =
+          new IvfBuildParams.Builder()
+              .setNumPartitions(NUM_PARTITIONS)
+              .setMaxIters(2)
+              .setCentroids(centroids)
+              .build();
+      PQBuildParams pqTrain =
+          new PQBuildParams.Builder().setNumSubVectors(4).setNumBits(8).setMaxIters(2).build();
+      PQBuildParams pqParams =
+          new PQBuildParams.Builder()
+              .setNumSubVectors(4)
+              .setNumBits(8)
+              .setMaxIters(2)
+              .setCodebook(VectorTrainer.trainPqCodebook(ds, VECTOR_COLUMN, pqTrain))
+              .build();
+      IndexParams params =
+          IndexParams.builder()
+              .setVectorIndexParams(
+                  new VectorIndexParams.Builder(ivfParams)
+                      .setDistanceType(DistanceType.L2)
+                      .setPqParams(pqParams)
+                      .build())
+              .build();
+      List<Index> segments = new ArrayList<>();
+      segments.add(
+          ds.createIndex(
+              IndexOptions.builder(
+                      Collections.singletonList(VECTOR_COLUMN), IndexType.IVF_PQ, params)
+                  .withIndexName(INDEX_NAME)
+                  .withFragmentIds(fragments)
+                  .build()));
+      ds.commitExistingIndexSegments(INDEX_NAME, VECTOR_COLUMN, segments);
+    }
+    spark.sql("REFRESH TABLE " + table);
   }
 
   private String createAngularTable(String name) {
