@@ -36,9 +36,7 @@ public class LanceSearchRowPartitionReader implements PartitionReader<InternalRo
       currentRecord = currentRows.next();
       return true;
     }
-    // Keep pulling batches: an empty batch means "nothing in this one", not end of stream. A
-    // fragment-restricted prefiltered search can produce one whenever the filter excludes every
-    // row the scan looked at.
+    // An empty batch means "nothing in this one", not end of stream.
     while (reader.next()) {
       ColumnarBatch currentBatch = reader.get();
       currentRows = currentBatch.rowIterator();

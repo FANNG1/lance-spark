@@ -145,10 +145,8 @@ public class LanceDistributedSearchColumnarPartitionReader
             .setColumn(column)
             .setKey(toFloatArray(base.getVector()))
             .setK(base.getK());
-    // The driver plans a fallback unit for fragments no index segment covers, so it must answer
-    // with an exact flat scan. lance-core defaults use_index to true, and a fragment-restricted
-    // scan still picks up any index segment covering the fragment, so leaving the default would
-    // quietly turn flat units - and every unit under bypass_vector_index - into ANN searches.
+    // lance-core defaults use_index to true, and a fragment-restricted scan still picks up an
+    // index segment covering the fragment, so a flat unit has to opt out to stay exact.
     if (fallbackUnit) {
       q.setUseIndex(false);
     }
@@ -156,10 +154,8 @@ public class LanceDistributedSearchColumnarPartitionReader
       q.setDistanceType(parseDistanceType(base.getDistanceType()));
     }
     if (base.getNprobes() != null) {
-      // setNprobes pins minimum = maximum = n, which is how lance now maps the nprobes field of a
-      // namespace query (lance#9184). A server still on an older mapping forwards it as a minimum
-      // and leaves the ceiling open, so the two paths can reach different recall for the same
-      // tuning; see the note in docs/src/operations/dql/vector-search.md.
+      // Exact bounds, matching how lance maps a namespace query's nprobes since lance#9184. A
+      // server on an older mapping treats it as a minimum; see vector-search.md.
       q.setNprobes(base.getNprobes());
     }
     if (base.getEf() != null) {
@@ -170,15 +166,9 @@ public class LanceDistributedSearchColumnarPartitionReader
     }
 
     ScanOptions.Builder b = new ScanOptions.Builder().nearest(q.build());
-    // A fragment-restricted nearest scan only runs with prefilter=true: lance-core otherwise
-    // rejects it outright with "Not supported: This operation is not supported for fragment
-    // scan" (ensure_not_fragment_scan in rust/lance/src/dataset/scanner.rs). Fallback units
-    // therefore always set it, whether or not a filter is present.
-    //
-    // Indexed units set it only when the user asked. A filtered query cannot reach here without
-    // prefilter=true - shouldUseDistributed rejects it - so indexed and fallback units always
-    // agree on filter semantics: the merged result does not depend on whether the table happens
-    // to carry a vector index.
+    // ensure_not_fragment_scan rejects a fragment-restricted nearest scan unless prefilter is
+    // set, so a fallback unit always sets it. Indexed units only do what the user asked; a
+    // filtered query cannot reach a worker without prefilter=true.
     if (fallbackUnit || Boolean.TRUE.equals(base.getPrefilter())) {
       b.prefilter(true);
     }

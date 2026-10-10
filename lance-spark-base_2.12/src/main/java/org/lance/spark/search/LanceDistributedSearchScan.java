@@ -61,12 +61,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   private static final String VECTOR_INDEX_DETAILS = "lance.index.pb.VectorIndexDetails";
   private static final String LEGACY_VECTOR_INDEX_DETAILS = "lance.index.VectorIndexDetails";
 
-  /**
-   * Column searched when {@code vector_column} is omitted. Must stay the field namespace execution
-   * defaults to, as documented in docs/src/operations/dql/vector-search.md: picking the first
-   * fixed-size-list field instead silently returns different neighbors on a table with more than
-   * one vector column.
-   */
+  /** Must stay the field namespace execution defaults to; see vector-search.md. */
   private static final String DEFAULT_VECTOR_COLUMN = "vector";
 
   private final StructType schema;
@@ -137,8 +132,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
               ? Optional.empty()
               : selectVectorIndex(dataset, column, query.getDistanceType(), fastSearch);
 
-      // Fragments no index segment covers; fast_search leaves them out entirely. A segment whose
-      // fragments are all gone (compaction, deletion) is stale and gets no unit of its own.
+      // A segment whose fragments are all gone (compaction, deletion) is stale: no unit for it.
       Set<Integer> fallbackFragments = new TreeSet<>(existingFragments);
       List<UUID> liveSegments = new ArrayList<>();
       if (vectorIndex.isPresent()) {
@@ -179,15 +173,12 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
                                 + "unindexed fragments"));
         resolvedQuery = resolvedQuery.toBuilder().distanceType(indexMetric).build();
       }
-      // The merge ranks every unit's rows against each other, so they all have to report distances
-      // on one scale. A quantized index (IVF_PQ and friends) reports the quantized distance, while
-      // a flat unit always reports the exact one. refine_factor makes an indexed unit take the
-      // original vectors back and re-score, which is what lance-core itself does for this plan
-      // shape - knn_combined re-scores exactly when a plan has uncovered fragments or stale rows,
-      // and returns the ANN distances untouched otherwise. Mirror that: refine only a mixed plan,
-      // so an all-indexed plan keeps reporting what the namespace path would report. A factor of 1
-      // re-scores without enlarging the candidate set, since lance-core gates the re-score on the
-      // factor being present rather than on its value.
+      // A quantized index reports quantized distances while a flat unit reports exact ones, and
+      // the merge ranks them against each other. refine_factor makes an indexed unit re-score
+      // against the original vectors, which is what knn_combined does - and it too only does it
+      // for a mixed plan, so an all-indexed plan is left reporting what namespace would report.
+      // A factor of 1 re-scores without enlarging the candidate set: the gate is presence, not
+      // value.
       LanceSearchQuery indexedQuery =
           mixedPlan && resolvedQuery.getRefineFactor() == null
               ? resolvedQuery.toBuilder().refineFactor(1).build()
@@ -260,10 +251,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       return Optional.empty();
     }
 
-    // A column can carry more than one vector index, so which one answers the query has to be
-    // picked the way lance-core picks it: the first index keyed on the column in manifest order.
-    // describeIndices sorts by index name instead, which selects a different index - and with it a
-    // different metric - whenever the names and the creation order disagree.
+    // A column can carry several vector indexes, so the choice has to match lance-core's.
     Optional<IndexDescription> selected = firstIndexOnColumn(dataset, indices, columnFieldId);
     if (!selected.isPresent()) {
       return Optional.empty();
@@ -273,12 +261,6 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
     String normalizedRequested = normalizeMetric(requestedMetric);
     Optional<String> indexMetric = resolveIndexMetric(dataset, idx);
     if (!indexMetricIsUsable(normalizedRequested, indexMetric)) {
-      // Two different diagnoses, one decision. A real mismatch is a user error they can fix by
-      // changing distance_type; an unreadable metric is a metadata problem no SQL change helps.
-      //
-      // Either way the search falls back to flat rather than looking for another index on the
-      // column. lance-core does the same: the metric only vetoes the index it already picked, it
-      // is never a selection criterion, so trying the next index would diverge again.
       if (indexMetric.isPresent()) {
         LOG.warn(
             "Ignoring vector index {} because query metric {} does not match index metric {}",
@@ -315,11 +297,9 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   }
 
   /**
-   * The vector index that answers a query on {@code columnFieldId}, chosen the way lance-core
-   * chooses it: {@code getIndexes()} reports segments in manifest - that is, creation - order, so
-   * the first one keyed on the column names the index. Its description then comes from {@code
-   * describeIndices}, which carries the segment list and the metric but is sorted by name and so
-   * cannot be used to make the choice.
+   * The first index keyed on the column in manifest order, which is what lance-core searches.
+   * {@code getIndexes()} is in that order; {@code describeIndices} is sorted by name, so it can
+   * supply the segments and metric but cannot make the choice.
    */
   private static Optional<IndexDescription> firstIndexOnColumn(
       Dataset dataset, List<IndexDescription> indices, int columnFieldId) {
@@ -348,8 +328,7 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
         return Optional.of(idx);
       }
     }
-    // getIndexes gave nothing usable; fall back to the name-sorted order so a working plan is
-    // still produced.
+    // Nothing usable from getIndexes; fall back to the name-sorted order.
     for (IndexDescription idx : indices) {
       if (isVectorIndex(idx)
           && !idx.getFieldIds().isEmpty()
@@ -429,14 +408,11 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
    * namespace execution fails on these datasets too.
    */
   /**
-   * Whether an index may answer a query asking for {@code requested}.
-   *
-   * <p>An omitted metric accepts any index - lance-core then searches with the index's own metric,
-   * and {@code planPartitionsOnce} resolves it when the plan also has flat units. A requested
-   * metric needs a resolved, equal index metric: unlike the namespace path, which opens the index
-   * to read its metric and silently brute-forces on a mismatch, this planner can only read index
-   * metadata, and handing an unverified segment to {@code indexSegments(...)} makes lance-core fail
-   * the task outright rather than fall back. Losing the index is the safe direction.
+   * Whether an index may answer a query asking for {@code requested}. An omitted metric accepts any
+   * index. A requested one needs a resolved, equal index metric: an unverified segment handed to
+   * {@code indexSegments(...)} makes lance-core fail the task rather than fall back, so losing the
+   * index is the safe direction. A mismatch never moves on to the next index, matching lance-core,
+   * where the metric only vetoes the index already chosen.
    */
   static boolean indexMetricIsUsable(String requested, Optional<String> indexMetric) {
     if (requested == null) {

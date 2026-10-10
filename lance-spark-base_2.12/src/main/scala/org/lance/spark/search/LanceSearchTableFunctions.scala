@@ -75,8 +75,7 @@ object LanceSearchTableFunctions {
       .tableId(resolved.table.readOptions().getTableId)
       .namespaceImpl(resolved.table.getNamespaceImpl)
       .namespaceProperties(resolved.table.getNamespaceProperties)
-      // Only the distributed path reads these: it opens the dataset itself instead of asking the
-      // namespace to run the search.
+      // Only the distributed path reads these; it opens the dataset itself.
       .readOptions(resolved.table.readOptions())
       .initialStorageOptions(resolved.table.getInitialStorageOptions)
       .outputColumns(requestColumns.asJava)
@@ -298,10 +297,9 @@ object LanceSearchTableFunctions {
       schema: StructType,
       query: LanceSearchQuery,
       resolved: ResolvedLanceTable): LogicalPlan = {
-    // Sorting on `_distance` alone leaves tied rows in whatever order the tasks deliver them, so
-    // the rows landing on the k and offset boundaries vary between runs - visible as pages that
-    // skip and repeat rows. lance-core sorts by (`_distance`, row id), so the merge reads the row
-    // id too, even when the query did not ask for it, and projects it away afterwards.
+    // lance-core sorts by (`_distance`, row id); on distance alone, tied rows land on the k and
+    // offset boundaries in task arrival order and paging stops being repeatable. So read the row
+    // id even when the query did not ask for it, and project it away afterwards.
     val wantsRowId = java.lang.Boolean.TRUE == query.getWithRowId
     val scanSchema =
       if (wantsRowId) schema
@@ -348,16 +346,13 @@ object LanceSearchTableFunctions {
 
   private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
     val spark = SparkSession.active
-    // Boolean.parseBoolean, not String.toBoolean: the latter throws on anything but
-    // "true"/"false", and this runs for every VECTOR_SEARCH, so a conf set to "1" or "on" would
-    // fail queries that never asked for distributed execution.
+    // Not String.toBoolean: it throws on anything but "true"/"false", and this runs for every
+    // VECTOR_SEARCH.
     val enabled = java.lang.Boolean.parseBoolean(
       spark.conf.get("spark.sql.lance.search.distributed.enabled", "false"))
     if (!enabled) return false
-    // Fragment-restricted fallback scans require prefilter=true in lance-core, so a distributed
-    // plan can only ever prefilter. Namespace execution defaults to prefilter=false, which
-    // post-filters the top k and therefore returns a different - usually smaller - set of rows.
-    // Make the user pick the semantics instead of silently switching them.
+    // A distributed plan can only prefilter, while namespace execution defaults to post-filtering
+    // the top k, which returns a different set of rows. Make the user pick.
     val hasFilter = query.getFilter != null && !query.getFilter.isEmpty
     if (hasFilter && java.lang.Boolean.TRUE != query.getPrefilter) {
       throw new IllegalArgumentException(
@@ -370,8 +365,7 @@ object LanceSearchTableFunctions {
         "Distributed VECTOR_SEARCH does not support prefilter=false; disable " +
           "spark.sql.lance.search.distributed.enabled to use namespace execution")
     }
-    // lance-core's Java scanner cannot apply distance bounds yet. Fail during planning instead of
-    // silently sending a distributed query back through the namespace.
+    // lance-core's Java scanner cannot apply distance bounds yet.
     if (query.getLowerBound != null || query.getUpperBound != null) {
       throw new IllegalArgumentException(
         "Distributed VECTOR_SEARCH does not support lower_bound or upper_bound; disable " +
