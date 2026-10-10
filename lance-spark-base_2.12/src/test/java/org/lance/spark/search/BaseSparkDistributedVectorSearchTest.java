@@ -233,6 +233,62 @@ public abstract class BaseSparkDistributedVectorSearchTest {
     assertEquals(4, prefiltered.get(0).getInt(0));
   }
 
+  @Test
+  void tiedDistancesPaginateTheSameWayEveryRun() {
+    Assumptions.assumeFalse(
+        spark.version().startsWith("3.4."),
+        "Spark 3.4 table-valued functions do not support named arguments");
+    // Identical vectors spread over several fragments: every row ties on `_distance`, so sorting
+    // on distance alone leaves the k and offset boundaries up to task arrival order and the two
+    // pages overlap or skip rows between runs. lance-core sorts by (distance, row id).
+    String fullName = CATALOG_NAME + ".default.dist_ties";
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL, vector ARRAY<FLOAT> NOT NULL) USING lance "
+            + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')");
+    for (int fragment = 0; fragment < 4; fragment++) {
+      int start = fragment * 3;
+      spark.sql(
+          "INSERT INTO "
+              + fullName
+              + " SELECT CAST(id AS INT), array(1.0, 1.0, 1.0, 1.0) FROM range("
+              + start
+              + ", "
+              + (start + 3)
+              + ", 1, 1)");
+    }
+
+    String page =
+        "SELECT id FROM VECTOR_SEARCH(table => '"
+            + fullName
+            + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 5";
+    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+
+    List<Integer> firstPage = idsOf(page + ")");
+    List<Integer> secondPage = idsOf(page + ", offset => 5)");
+    assertEquals(5, firstPage.size());
+    assertEquals(5, secondPage.size());
+    for (int run = 0; run < 4; run++) {
+      assertEquals(firstPage, idsOf(page + ")"), "page 1 must not move between runs");
+      assertEquals(secondPage, idsOf(page + ", offset => 5)"), "page 2 must not move");
+    }
+    List<Integer> combined = new ArrayList<>(firstPage);
+    combined.addAll(secondPage);
+    assertEquals(
+        combined.size(),
+        new java.util.HashSet<>(combined).size(),
+        "the two pages must not repeat a row: " + combined);
+  }
+
+  private List<Integer> idsOf(String sql) {
+    List<Integer> ids = new ArrayList<>();
+    for (Row row : spark.sql(sql).collectAsList()) {
+      ids.add(row.getInt(0));
+    }
+    return ids;
+  }
+
   private static String rootMessage(Throwable throwable) {
     Throwable root = throwable;
     while (root.getCause() != null) {

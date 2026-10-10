@@ -298,33 +298,52 @@ object LanceSearchTableFunctions {
       schema: StructType,
       query: LanceSearchQuery,
       resolved: ResolvedLanceTable): LogicalPlan = {
+    // Sorting on `_distance` alone leaves tied rows in whatever order the tasks deliver them, so
+    // the rows landing on the k and offset boundaries vary between runs - visible as pages that
+    // skip and repeat rows. lance-core sorts by (`_distance`, row id), so the merge reads the row
+    // id too, even when the query did not ask for it, and projects it away afterwards.
+    val wantsRowId = java.lang.Boolean.TRUE == query.getWithRowId
+    val scanSchema =
+      if (wantsRowId) schema
+      else schema.add(StructField(RowIdColumn, DataTypes.LongType, nullable = true))
+    val scanQuery = if (wantsRowId) query else query.toBuilder.withRowId(true).build()
+
     val rel = DataSourceV2Relation.create(
-      new LanceDistributedSearchTable(functionName, schema, query),
+      new LanceDistributedSearchTable(functionName, scanSchema, scanQuery),
       Some(resolved.catalog),
       Some(resolved.identifier),
       CaseInsensitiveStringMap.empty())
 
-    val distanceAttr =
+    def internalColumn(name: String) =
       rel.output
-        .find(attr => attr.name == DistanceMetricColumn)
+        .find(attr => attr.name == name)
         .getOrElse {
           throw new IllegalStateException(
-            s"Internal column ${DistanceMetricColumn} is missing from vector_search plan.")
+            s"Internal column ${name} is missing from vector_search plan.")
         }
-    val sorted = Sort(Seq(SortOrder(distanceAttr, Ascending)), global = true, rel)
+
+    val sortOrder =
+      Seq(
+        SortOrder(internalColumn(DistanceMetricColumn), Ascending),
+        SortOrder(internalColumn(RowIdColumn), Ascending))
+    val sorted = Sort(sortOrder, global = true, rel)
     val totalCandidates = query.getK
     val effectiveOffset =
       if (query.getOffset != null) query.getOffset.intValue() else 0
     val userK = math.max(totalCandidates - effectiveOffset, 0)
     val candidateLimited =
       GlobalLimit(Literal(totalCandidates), LocalLimit(Literal(totalCandidates), sorted))
-    if (effectiveOffset > 0) {
-      GlobalLimit(
-        Literal(userK),
-        LocalLimit(Literal(userK), Offset(Literal(effectiveOffset), candidateLimited)))
-    } else {
-      candidateLimited
-    }
+    val limited =
+      if (effectiveOffset > 0) {
+        GlobalLimit(
+          Literal(userK),
+          LocalLimit(Literal(userK), Offset(Literal(effectiveOffset), candidateLimited)))
+      } else {
+        candidateLimited
+      }
+
+    if (wantsRowId) limited
+    else Project(rel.output.filterNot(attr => attr.name == RowIdColumn), limited)
   }
 
   private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
