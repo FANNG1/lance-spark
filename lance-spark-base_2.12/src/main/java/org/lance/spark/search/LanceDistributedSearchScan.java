@@ -249,56 +249,113 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       return Optional.empty();
     }
 
-    Map<Integer, String> fieldIdToName = new HashMap<>();
+    Integer columnFieldId = null;
     for (LanceField field : dataset.getLanceSchema().fields()) {
-      fieldIdToName.put(field.getId(), field.getName());
+      if (column.equals(field.getName())) {
+        columnFieldId = field.getId();
+        break;
+      }
+    }
+    if (columnFieldId == null) {
+      return Optional.empty();
     }
 
-    String normalizedRequested = normalizeMetric(requestedMetric);
-    boolean sawIndexForColumn = false;
-    for (IndexDescription idx : indices) {
-      if (!isVectorIndex(idx)) {
-        continue;
-      }
-      if (idx.getFieldIds().isEmpty()
-          || !column.equals(fieldIdToName.get(idx.getFieldIds().get(0)))) {
-        continue;
-      }
-      sawIndexForColumn = true;
-      Optional<String> indexMetric = resolveIndexMetric(dataset, idx);
-      if (!indexMetricIsUsable(normalizedRequested, indexMetric)) {
-        // Two different diagnoses, one decision. A real mismatch is a user error they can fix by
-        // changing distance_type; an unreadable metric is a metadata problem no SQL change helps.
-        if (indexMetric.isPresent()) {
-          LOG.warn(
-              "Ignoring vector index {} because query metric {} does not match index metric {}",
-              idx.getName(),
-              normalizedRequested,
-              indexMetric.get());
-        } else {
-          LOG.warn(
-              "Ignoring vector index {} because its metric could not be read from the index "
-                  + "metadata, so it cannot be confirmed to match query metric {}",
-              idx.getName(),
-              normalizedRequested);
-        }
-        continue;
-      }
-      List<VectorIndexSegment> segments = new ArrayList<>();
-      for (Index segment : idx.getSegments()) {
-        segments.add(
-            new VectorIndexSegment(
-                segment.uuid(), requireFragmentCoverage(idx.getName(), segment.fragments())));
-      }
-      return Optional.of(new VectorIndexInfo(idx.getName(), segments, indexMetric));
+    // A column can carry more than one vector index, so which one answers the query has to be
+    // picked the way lance-core picks it: the first index keyed on the column in manifest order.
+    // describeIndices sorts by index name instead, which selects a different index - and with it a
+    // different metric - whenever the names and the creation order disagree.
+    Optional<IndexDescription> selected = firstIndexOnColumn(dataset, indices, columnFieldId);
+    if (!selected.isPresent()) {
+      return Optional.empty();
     }
-    if (fastSearch && normalizedRequested != null && sawIndexForColumn) {
-      throw new IllegalArgumentException(
-          "fast_search cannot use any vector index on column '"
-              + column
-              + "' with distance_type '"
-              + normalizedRequested
-              + "'");
+    IndexDescription idx = selected.get();
+
+    String normalizedRequested = normalizeMetric(requestedMetric);
+    Optional<String> indexMetric = resolveIndexMetric(dataset, idx);
+    if (!indexMetricIsUsable(normalizedRequested, indexMetric)) {
+      // Two different diagnoses, one decision. A real mismatch is a user error they can fix by
+      // changing distance_type; an unreadable metric is a metadata problem no SQL change helps.
+      //
+      // Either way the search falls back to flat rather than looking for another index on the
+      // column. lance-core does the same: the metric only vetoes the index it already picked, it
+      // is never a selection criterion, so trying the next index would diverge again.
+      if (indexMetric.isPresent()) {
+        LOG.warn(
+            "Ignoring vector index {} because query metric {} does not match index metric {}",
+            idx.getName(),
+            normalizedRequested,
+            indexMetric.get());
+      } else {
+        LOG.warn(
+            "Ignoring vector index {} because its metric could not be read from the index "
+                + "metadata, so it cannot be confirmed to match query metric {}",
+            idx.getName(),
+            normalizedRequested);
+      }
+      if (fastSearch) {
+        throw new IllegalArgumentException(
+            "fast_search cannot use vector index '"
+                + idx.getName()
+                + "' on column '"
+                + column
+                + "' with distance_type '"
+                + normalizedRequested
+                + "'");
+      }
+      return Optional.empty();
+    }
+
+    List<VectorIndexSegment> segments = new ArrayList<>();
+    for (Index segment : idx.getSegments()) {
+      segments.add(
+          new VectorIndexSegment(
+              segment.uuid(), requireFragmentCoverage(idx.getName(), segment.fragments())));
+    }
+    return Optional.of(new VectorIndexInfo(idx.getName(), segments, indexMetric));
+  }
+
+  /**
+   * The vector index that answers a query on {@code columnFieldId}, chosen the way lance-core
+   * chooses it: {@code getIndexes()} reports segments in manifest - that is, creation - order, so
+   * the first one keyed on the column names the index. Its description then comes from {@code
+   * describeIndices}, which carries the segment list and the metric but is sorted by name and so
+   * cannot be used to make the choice.
+   */
+  private static Optional<IndexDescription> firstIndexOnColumn(
+      Dataset dataset, List<IndexDescription> indices, int columnFieldId) {
+    Map<String, IndexDescription> vectorIndexesByName = new HashMap<>();
+    for (IndexDescription idx : indices) {
+      if (isVectorIndex(idx)) {
+        vectorIndexesByName.put(idx.getName(), idx);
+      }
+    }
+    if (vectorIndexesByName.isEmpty()) {
+      return Optional.empty();
+    }
+    List<Index> manifestOrder;
+    try {
+      manifestOrder = dataset.getIndexes();
+    } catch (Exception e) {
+      LOG.warn("getIndexes failed, keeping the name-sorted order: {}", e.getMessage());
+      manifestOrder = Collections.emptyList();
+    }
+    for (Index segment : manifestOrder) {
+      if (segment.fields().isEmpty() || segment.fields().get(0) != columnFieldId) {
+        continue;
+      }
+      IndexDescription idx = vectorIndexesByName.get(segment.name());
+      if (idx != null) {
+        return Optional.of(idx);
+      }
+    }
+    // getIndexes gave nothing usable; fall back to the name-sorted order so a working plan is
+    // still produced.
+    for (IndexDescription idx : indices) {
+      if (isVectorIndex(idx)
+          && !idx.getFieldIds().isEmpty()
+          && idx.getFieldIds().get(0) == columnFieldId) {
+        return Optional.of(idx);
+      }
     }
     return Optional.empty();
   }

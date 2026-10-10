@@ -565,6 +565,69 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     }
   }
 
+  @Test
+  void twoIndexesOnOneColumnPickTheOneNamespaceWouldPick() throws Exception {
+    // describeIndices sorts by index name, lance-core takes the first index on the column in
+    // creation order. With two metrics on one column the two orders select different indexes, and
+    // "nearest" then means something different on each path.
+    String table = CATALOG_NAME + ".default.idx_two_metrics";
+    spark.sql(
+        "CREATE TABLE "
+            + table
+            + " (id INT NOT NULL, "
+            + VECTOR_COLUMN
+            + " ARRAY<FLOAT> NOT NULL) USING lance "
+            + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '"
+            + DIM
+            + "')");
+    // Even ids: magnitude 10 at a tiny angle - excellent cosine, poor L2.
+    // Odd ids: magnitude 1 at ~45 degrees - poor cosine, excellent L2.
+    spark.sql(
+        "INSERT INTO "
+            + table
+            + " SELECT CAST(id AS INT), array("
+            + "CAST(CASE WHEN id % 2 = 0 THEN 10 * cos(radians(id * 0.5)) "
+            + "ELSE 1 * cos(radians(45 + id * 0.5)) END AS FLOAT), "
+            + "CAST(CASE WHEN id % 2 = 0 THEN 10 * sin(radians(id * 0.5)) "
+            + "ELSE 1 * sin(radians(45 + id * 0.5)) END AS FLOAT), "
+            + "0.0, 0.0, 0.0, 0.0, 0.0, 0.0) FROM range(0, 128, 1, 1)");
+
+    // vec_l2 first in creation order; a_cos first by name.
+    for (Object[] spec :
+        new Object[][] {{"vec_l2", DistanceType.L2}, {"a_cos", DistanceType.Cosine}}) {
+      try (Dataset ds = openDataset(table)) {
+        ds.createIndex(
+            IndexOptions.builder(
+                    Collections.singletonList(VECTOR_COLUMN),
+                    IndexType.IVF_FLAT,
+                    indexParams(ds, (DistanceType) spec[1]))
+                .withIndexName((String) spec[0])
+                .build());
+      }
+    }
+    spark.sql("REFRESH TABLE " + table);
+    try (Dataset ds = openDataset(table)) {
+      assertEquals(
+          java.util.Arrays.asList("vec_l2", "a_cos"),
+          ds.listIndexes(),
+          "sanity: creation order must differ from name order for this to test anything");
+    }
+
+    String sql =
+        "SELECT id FROM VECTOR_SEARCH(table => '"
+            + table
+            + "', query_vector => array(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), k => 6, nprobes => "
+            + NUM_PARTITIONS
+            + ")";
+    List<Integer> reference = ids(collect(sql, false));
+    List<Integer> distributed = ids(collect(sql, true));
+    assertEquals(
+        reference, distributed, "both paths must search through the index created first (vec_l2)");
+    for (Integer id : distributed) {
+      assertEquals(1, id % 2, "vec_l2 is the L2 index, whose neighbours here are the odd ids");
+    }
+  }
+
   private String createTable(String name, int inserts) {
     String fullName = CATALOG_NAME + ".default." + name;
     spark.sql(
